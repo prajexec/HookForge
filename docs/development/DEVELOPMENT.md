@@ -1,0 +1,63 @@
+# Development guide
+
+## Local setup
+
+Use Node.js 22.x and npm 10.x. On Apple Silicon, Docker Desktop must be
+configured to use the native ARM64 engine. From a clean checkout:
+
+```bash
+cp .env.example .env
+npm install
+docker compose up -d
+npm run db:migrate
+```
+
+The default Compose services do not publish PostgreSQL or Redis ports. The
+host-run API can use the loopback-only debug override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+```
+
+## Environment
+
+`DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `LOG_LEVEL`, and `CORS_ORIGIN` are
+validated by Zod at API startup. `.env` is ignored by Git. The example values
+are local-only and must not be reused in production.
+
+## Checks
+
+```bash
+npm run format:check
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Run `npm run dev:api` and `npm run dev:web` in separate terminals. API tests
+use in-memory dependency doubles and do not require internet access. Database
+integration tests will be added with the domain schema.
+
+## Migrations
+
+Migrations are ordered SQL files in `db/migrations/`. Run `npm run db:migrate`
+after the database is reachable. The runner creates `schema_migrations`, runs
+each unapplied file in a transaction, and records its version. Never edit an
+already-applied migration; add a new one.
+
+## Git workflow
+
+Use a focused conventional commit after each verified milestone. Keep code,
+tests, and documentation for a feature together. Do not commit `.env`, secrets,
+`node_modules`, `dist`, coverage output, or database volumes. Review
+`git diff` and `git status` before committing.
+
+## Common issues
+
+- If Docker commands cannot connect to the daemon, start Docker Desktop before
+  running Compose.
+- If readiness fails, inspect `docker compose ps` and
+  `docker compose logs --tail=100 postgres redis`.
+- If disk usage grows, inspect `docker system df` first. Do not use volume prune
+  commands unless you have confirmed the named database volume is not needed.

@@ -1,0 +1,12 @@
+# Changelog
+
+## Unreleased
+
+### Added
+
+- Initialized the TypeScript npm workspace for API, worker, web, and shared
+  packages.
+- Added Fastify liveness, dependency readiness, and lightweight metrics routes.
+- Added ARM64-conscious PostgreSQL and Redis Compose services.
+- Added the transactional SQL migration runner and initial `pgcrypto` migration.
+- Added foundation architecture, security, operations, and development docs.

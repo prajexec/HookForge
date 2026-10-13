@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hookforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hookforge_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-hookforge}
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+    volumes:
+      - hookforge_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - hookforge_backend
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - noeviction
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - hookforge_backend
+
+volumes:
+  hookforge_postgres_data:
+    name: hookforge_postgres_data
+
+networks:
+  hookforge_backend:
+    name: hookforge_backend
