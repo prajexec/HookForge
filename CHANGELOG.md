@@ -19,3 +19,5 @@
 - Added the delivery worker with PostgreSQL leases, HMAC-SHA256 signatures,
   bounded HTTP requests, retry classification/backoff, response excerpts, and
   abandoned-lease recovery.
+- Added paginated delivery inspection, attempt-history detail, project-scoped
+  replay, and expired-lease reconciliation APIs.

@@ -58,6 +58,66 @@ export interface IngestEventResult {
   deduplicated: boolean;
 }
 
+export type DeliveryStatus = "pending" | "in_flight" | "delivered" | "failed";
+
+export interface DeliveryCursor {
+  createdAt: string;
+  id: string;
+}
+
+export interface DeliverySummary {
+  id: string;
+  projectId: string;
+  eventId: string;
+  eventType: string;
+  endpointId: string;
+  endpointName: string;
+  endpointUrl: string;
+  status: DeliveryStatus;
+  attemptCount: number;
+  nextAttemptAt: string;
+  lastHttpStatusCode: number | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  replayOfDeliveryId: string | null;
+  replayNumber: number;
+}
+
+export interface DeliveryAttemptRecord {
+  id: string;
+  attemptNumber: number;
+  requestAt: string;
+  responseAt: string | null;
+  httpStatusCode: number | null;
+  responseDurationMs: number | null;
+  responseExcerpt: string | null;
+  errorClassification: string | null;
+  outcome: "success" | "retry" | "failed";
+}
+
+export interface DeliveryDetail {
+  delivery: DeliverySummary;
+  eventPayload: JsonValue;
+  attempts: DeliveryAttemptRecord[];
+}
+
+export interface DeliveryListFilter {
+  limit: number;
+  status?: DeliveryStatus;
+  endpointId?: string;
+  eventType?: string;
+  from?: Date;
+  to?: Date;
+  cursor?: DeliveryCursor;
+}
+
+export interface DeliveryListResult {
+  deliveries: DeliverySummary[];
+  nextCursor: DeliveryCursor | null;
+}
+
 export interface EncryptedSecretRecord {
   ciphertext: string;
   iv: string;
@@ -130,6 +190,25 @@ export interface HookForgeStore {
     idempotencyKey?: string;
     requestHash: string;
   }): Promise<IngestEventResult>;
+  listDeliveries(
+    ownerId: string,
+    projectId: string,
+    filter: DeliveryListFilter,
+  ): Promise<DeliveryListResult>;
+  getDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliveryDetail | null>;
+  replayDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliverySummary | null>;
+  reconcileExpiredDeliveries(
+    ownerId: string,
+    projectId: string,
+  ): Promise<number>;
 }
 
 type DatabaseRow = QueryResultRow & Record<string, unknown>;
@@ -180,6 +259,73 @@ function mapEvent(row: DatabaseRow): EventRecord {
     createdAt: new Date(String(row.created_at)).toISOString(),
   };
 }
+
+function dateOrNull(value: unknown): string | null {
+  return value ? new Date(String(value)).toISOString() : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+function mapDelivery(row: DatabaseRow): DeliverySummary {
+  return {
+    id: String(row.delivery_id),
+    projectId: String(row.project_id),
+    eventId: String(row.event_id),
+    eventType: String(row.event_type),
+    endpointId: String(row.endpoint_id),
+    endpointName: String(row.endpoint_name),
+    endpointUrl: String(row.endpoint_url),
+    status: row.status as DeliveryStatus,
+    attemptCount: Number(row.attempt_count),
+    nextAttemptAt: new Date(String(row.next_attempt_at)).toISOString(),
+    lastHttpStatusCode: numberOrNull(row.last_http_status_code),
+    lastError: row.last_error ? String(row.last_error) : null,
+    createdAt: new Date(String(row.delivery_created_at)).toISOString(),
+    updatedAt: new Date(String(row.delivery_updated_at)).toISOString(),
+    completedAt: dateOrNull(row.completed_at),
+    replayOfDeliveryId: row.replay_of_delivery_id
+      ? String(row.replay_of_delivery_id)
+      : null,
+    replayNumber: Number(row.replay_number),
+  };
+}
+
+function mapAttempt(row: DatabaseRow): DeliveryAttemptRecord {
+  return {
+    id: String(row.id),
+    attemptNumber: Number(row.attempt_number),
+    requestAt: new Date(String(row.request_at)).toISOString(),
+    responseAt: dateOrNull(row.response_at),
+    httpStatusCode: numberOrNull(row.http_status_code),
+    responseDurationMs: numberOrNull(row.response_duration_ms),
+    responseExcerpt: row.response_excerpt ? String(row.response_excerpt) : null,
+    errorClassification: row.error_classification
+      ? String(row.error_classification)
+      : null,
+    outcome: row.outcome as DeliveryAttemptRecord["outcome"],
+  };
+}
+
+const deliveryColumns = `
+  d.id AS delivery_id,
+  e.project_id,
+  d.event_id,
+  e.event_type,
+  d.endpoint_id,
+  ep.name AS endpoint_name,
+  d.endpoint_url,
+  d.status,
+  d.attempt_count,
+  d.next_attempt_at,
+  d.last_http_status_code,
+  d.last_error,
+  d.created_at AS delivery_created_at,
+  d.updated_at AS delivery_updated_at,
+  d.completed_at,
+  d.replay_of_delivery_id,
+  d.replay_number`;
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -661,5 +807,209 @@ export class PgStore implements HookForgeStore {
     } finally {
       client.release();
     }
+  }
+
+  public async listDeliveries(
+    ownerId: string,
+    projectId: string,
+    filter: DeliveryListFilter,
+  ): Promise<DeliveryListResult> {
+    const values: unknown[] = [projectId, ownerId];
+    const conditions = ["p.id = $1", "p.owner_id = $2"];
+    const addValue = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+
+    if (filter.status) {
+      conditions.push(`d.status = ${addValue(filter.status)}`);
+    }
+    if (filter.endpointId) {
+      conditions.push(`d.endpoint_id = ${addValue(filter.endpointId)}::uuid`);
+    }
+    if (filter.eventType) {
+      conditions.push(`e.event_type = ${addValue(filter.eventType)}`);
+    }
+    if (filter.from) {
+      conditions.push(`d.created_at >= ${addValue(filter.from)}::timestamptz`);
+    }
+    if (filter.to) {
+      conditions.push(`d.created_at < ${addValue(filter.to)}::timestamptz`);
+    }
+    if (filter.cursor) {
+      const cursorCreatedAt = addValue(filter.cursor.createdAt);
+      const cursorId = addValue(filter.cursor.id);
+      conditions.push(
+        `(d.created_at, d.id) < (${cursorCreatedAt}::timestamptz, ${cursorId}::uuid)`,
+      );
+    }
+    const limit = filter.limit + 1;
+    const limitParameter = addValue(limit);
+    const result = await this.pool.query<DatabaseRow>(
+      `SELECT ${deliveryColumns}
+       FROM deliveries d
+       JOIN events e ON e.id = d.event_id
+       JOIN projects p ON p.id = e.project_id
+       JOIN endpoints ep ON ep.id = d.endpoint_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY d.created_at DESC, d.id DESC
+       LIMIT ${limitParameter}`,
+      values,
+    );
+    const hasMore = result.rows.length > filter.limit;
+    const rows = hasMore ? result.rows.slice(0, filter.limit) : result.rows;
+    const last = rows.at(-1);
+    return {
+      deliveries: rows.map(mapDelivery),
+      nextCursor:
+        hasMore && last
+          ? {
+              createdAt: new Date(
+                String(last.delivery_created_at),
+              ).toISOString(),
+              id: String(last.delivery_id),
+            }
+          : null,
+    };
+  }
+
+  public async getDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliveryDetail | null> {
+    const result = await this.pool.query<DatabaseRow>(
+      `SELECT ${deliveryColumns}, e.payload AS event_payload
+       FROM deliveries d
+       JOIN events e ON e.id = d.event_id
+       JOIN projects p ON p.id = e.project_id
+       JOIN endpoints ep ON ep.id = d.endpoint_id
+       WHERE d.id = $1 AND p.id = $2 AND p.owner_id = $3`,
+      [deliveryId, projectId, ownerId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    const attempts = await this.pool.query<DatabaseRow>(
+      `SELECT id, attempt_number, request_at, response_at, http_status_code,
+              response_duration_ms, response_excerpt, error_classification, outcome
+       FROM delivery_attempts
+       WHERE delivery_id = $1
+       ORDER BY attempt_number ASC`,
+      [deliveryId],
+    );
+    return {
+      delivery: mapDelivery(row),
+      eventPayload: row.event_payload as JsonValue,
+      attempts: attempts.rows.map(mapAttempt),
+    };
+  }
+
+  public async replayDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliverySummary | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const source = await client.query<DatabaseRow>(
+        `SELECT d.id, d.event_id, d.endpoint_id, d.status,
+                e.project_id, ep.status AS endpoint_status, ep.url AS current_url,
+                ep.current_secret_version
+         FROM deliveries d
+         JOIN events e ON e.id = d.event_id
+         JOIN projects p ON p.id = e.project_id
+         JOIN endpoints ep ON ep.id = d.endpoint_id
+         WHERE d.id = $1 AND p.id = $2 AND p.owner_id = $3
+         FOR UPDATE OF d, ep`,
+        [deliveryId, projectId, ownerId],
+      );
+      const sourceRow = source.rows[0];
+      if (!sourceRow) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (sourceRow.status !== "failed") {
+        throw conflict(
+          "DELIVERY_NOT_FAILED",
+          "Only terminally failed deliveries can be replayed",
+        );
+      }
+      if (sourceRow.endpoint_status !== "active") {
+        throw conflict(
+          "ENDPOINT_NOT_ACTIVE",
+          "The endpoint must be active before a delivery can be replayed",
+        );
+      }
+
+      await client.query(
+        `SELECT id FROM deliveries
+         WHERE event_id = $1 AND endpoint_id = $2
+         FOR UPDATE`,
+        [sourceRow.event_id, sourceRow.endpoint_id],
+      );
+      const nextReplay = await client.query<{ next: number }>(
+        `SELECT COALESCE(MAX(replay_number), 0) + 1 AS next
+         FROM deliveries WHERE event_id = $1 AND endpoint_id = $2`,
+        [sourceRow.event_id, sourceRow.endpoint_id],
+      );
+      const replayNumber = Number(nextReplay.rows[0]?.next ?? 1);
+      const inserted = await client.query<DatabaseRow>(
+        `INSERT INTO deliveries
+           (event_id, endpoint_id, endpoint_url, endpoint_secret_version,
+            replay_of_delivery_id, replay_number)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id`,
+        [
+          sourceRow.event_id,
+          sourceRow.endpoint_id,
+          sourceRow.current_url,
+          sourceRow.current_secret_version,
+          sourceRow.id,
+          replayNumber,
+        ],
+      );
+      const replay = await client.query<DatabaseRow>(
+        `SELECT ${deliveryColumns}
+         FROM deliveries d
+         JOIN events e ON e.id = d.event_id
+         JOIN projects p ON p.id = e.project_id
+         JOIN endpoints ep ON ep.id = d.endpoint_id
+         WHERE d.id = $1`,
+        [inserted.rows[0]!.id],
+      );
+      await client.query("COMMIT");
+      return mapDelivery(replay.rows[0]!);
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async reconcileExpiredDeliveries(
+    ownerId: string,
+    projectId: string,
+  ): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE deliveries d
+       SET status = 'pending',
+           next_attempt_at = LEAST(d.next_attempt_at, now()),
+           lease_expires_at = NULL,
+           lease_token = NULL,
+           updated_at = now()
+       FROM events e
+       JOIN projects p ON p.id = e.project_id
+       WHERE d.event_id = e.id
+         AND p.id = $1
+         AND p.owner_id = $2
+         AND d.status = 'in_flight'
+         AND d.lease_expires_at <= now()
+       RETURNING d.id`,
+      [projectId, ownerId],
+    );
+    return result.rowCount ?? 0;
   }
 }

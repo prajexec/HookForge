@@ -23,6 +23,9 @@
   attempt, disables redirects, applies request deadlines, and bounds response
   body reads. HMAC signatures use constant-time verification in the helper and
   include a timestamp tolerance for receiver-side replay protection.
+- Delivery inspection, replay, and reconciliation queries are scoped through
+  the authenticated project owner. Replay preserves history and does not allow
+  a caller to submit an arbitrary event or endpoint ID.
 
 ## Planned security boundaries
 

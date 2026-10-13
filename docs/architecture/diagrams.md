@@ -66,6 +66,7 @@ stateDiagram-v2
   InFlight --> Pending: retryable failure and attempts remain
   InFlight --> Failed: terminal failure or attempts exhausted
   InFlight --> Pending: lease expires after worker crash
+  Failed --> Pending: API creates a separate replay delivery
   Delivered --> [*]
   Failed --> [*]
 ```

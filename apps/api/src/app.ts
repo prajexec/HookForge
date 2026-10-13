@@ -11,6 +11,7 @@ import { AppError } from "./errors.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerEndpointRoutes } from "./routes/endpoints.js";
 import { registerEventRoutes } from "./routes/events.js";
+import { registerDeliveryRoutes } from "./routes/deliveries.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import type { EndpointUrlValidator } from "./security/url.js";
 import { Metrics } from "./metrics.js";
@@ -82,6 +83,10 @@ export async function buildApp({
   });
   await registerEventRoutes(app, {
     config,
+    store: dependencies.store,
+    metrics,
+  });
+  await registerDeliveryRoutes(app, {
     store: dependencies.store,
     metrics,
   });

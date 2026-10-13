@@ -21,12 +21,14 @@ The repository currently contains the foundation milestone:
 - Idempotent event ingestion with atomic delivery fan-out for active endpoints.
 - PostgreSQL-backed worker with leases, bounded HTTP delivery, HMAC signatures,
   retry scheduling, attempt history, and abandoned-lease recovery.
+- Paginated delivery inspection, attempt-history detail, replay, and lease
+  reconciliation APIs.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, and URL policy.
 
-The delivery worker, signed HTTP delivery, retries, dashboard data views, and
-OpenAPI generation are deliberately introduced in later tested milestones.
+Dashboard data views, Dockerized application services, and OpenAPI generation
+are deliberately introduced in later tested milestones.
 
 ## Architecture direction
 
@@ -127,10 +129,10 @@ real API-backed dashboard milestone.
 
 ## Current limitations and roadmap
 
-The current milestone accepts, schedules, and delivers events through the
-standalone worker process. The next milestones add delivery inspection and
-replay APIs, the API-backed dashboard, Dockerized application services, and
-OpenAPI generation.
+The current milestone accepts, schedules, delivers, inspects, and replays
+events through the API and standalone worker process. The next milestones add
+the API-backed dashboard, Dockerized application services, and OpenAPI
+generation.
 
 `npm test` runs fast in-memory unit and route tests. Once PostgreSQL and Redis
 are running, `npm run test:integration` applies migrations and runs the real

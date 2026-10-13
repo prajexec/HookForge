@@ -50,5 +50,8 @@ and structured API logs for request IDs. Check disk usage with
 `docker system df`. Remove only project-specific stopped containers or unused
 images after inspection. Do not run `docker volume prune` as a routine cleanup.
 
-Delivery retry inspection, abandoned-job reconciliation, backups, and incident
-procedures will be expanded when the worker and delivery schema are implemented.
+Use the delivery API to inspect failed rows and attempt history. To recover
+expired leases for one project explicitly, call the reconcile route; normal
+worker claims recover them automatically. Replay only terminal failures and
+confirm the endpoint is active before replaying. Backups and broader incident
+procedures should include both `deliveries` and `delivery_attempts`.

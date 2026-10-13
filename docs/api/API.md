@@ -166,6 +166,43 @@ idempotency key when present, snapshots active endpoint URLs and secret versions
 and inserts delivery rows before committing. A committed accepted event
 therefore cannot be acknowledged without its durable initial delivery work.
 
-The standalone worker claims those pending rows asynchronously. The current
-milestone does not yet expose delivery inspection or replay routes; those will
-be added after the attempt-history API is implemented.
+The standalone worker claims those pending rows asynchronously. Delivery
+inspection and replay routes are described below.
+
+## Delivery inspection and replay
+
+### `GET /api/v1/projects/{projectId}/deliveries`
+
+Returns a bounded keyset-paginated list of deliveries owned by the authenticated
+user. Supported query parameters are:
+
+- `limit` — 1 through 100, default 25
+- `cursor` — opaque cursor returned by the previous response
+- `status` — `pending`, `in_flight`, `delivered`, or `failed`
+- `endpointId` — filter by endpoint UUID
+- `eventType` — filter by exact event type
+- `from` and `to` — ISO-8601 creation-time range; `to` is exclusive
+
+The response includes `pagination.nextCursor`, or `null` at the end. Delivery
+rows include attempt count, current status, last HTTP status/error, endpoint
+snapshot, and replay metadata. Signing secrets are never included.
+
+### `GET /api/v1/projects/{projectId}/deliveries/{deliveryId}`
+
+Returns one authorized delivery, its event payload, and the complete ordered
+attempt history. An inaccessible or unknown delivery returns `404`.
+
+### `POST /api/v1/projects/{projectId}/deliveries/{deliveryId}/replay`
+
+Only a terminally failed delivery can be replayed. The API creates a separate
+pending delivery row, preserves the original attempt history, and snapshots the
+endpoint's current URL and secret version. The endpoint must currently be
+active. The response is `202 Accepted` with `replayNumber` and the source
+delivery ID. Replaying a pending, in-flight, or delivered delivery returns
+`409`.
+
+### `POST /api/v1/projects/{projectId}/deliveries/reconcile`
+
+Returns expired in-flight deliveries for that project to `pending` and clears
+their leases. The worker performs the same recovery automatically while
+claiming; this route is an explicit operational reconciliation tool.

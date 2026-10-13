@@ -335,4 +335,90 @@ describe("authenticated project and endpoint management", () => {
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("PAYLOAD_TOO_LARGE");
   });
+
+  it("lists delivery attempts and creates a separate replay delivery", async () => {
+    const { app, store } = await createApplication();
+    const user = await register(app, "replay@example.com");
+    const headers = { authorization: `Bearer ${user.token}` };
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers,
+      payload: { name: "Replay project" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: { name: "Receiver", url: "https://example.com/replay" },
+    });
+    const eventResponse = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: {
+        eventType: "replay.test",
+        payload: { replay: true },
+      },
+    });
+    const eventId = eventResponse.json().event.id as string;
+    const original = store.deliveries.find(
+      (delivery) => delivery.eventId === eventId,
+    )!;
+    original.status = "failed";
+    original.attemptCount = 1;
+    original.lastHttpStatusCode = 503;
+    original.lastError = "receiver unavailable";
+    store.attempts.set(original.id, [
+      {
+        id: "attempt-1",
+        attemptNumber: 1,
+        requestAt: original.createdAt,
+        responseAt: original.updatedAt,
+        httpStatusCode: 503,
+        responseDurationMs: 100,
+        responseExcerpt: "unavailable",
+        errorClassification: "http_server_error",
+        outcome: "failed",
+      },
+    ]);
+
+    const list = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/${projectId}/deliveries?status=failed&limit=1`,
+      headers,
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().deliveries).toHaveLength(1);
+    expect(list.json().pagination.nextCursor).toBeNull();
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/projects/${projectId}/deliveries/${original.id}`,
+      headers,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().eventPayload).toEqual({ replay: true });
+    expect(detail.json().attempts).toHaveLength(1);
+
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/deliveries/${original.id}/replay`,
+      headers,
+    });
+    expect(replay.statusCode).toBe(202);
+    expect(replay.json().delivery.status).toBe("pending");
+    expect(replay.json().delivery.replayNumber).toBe(1);
+    expect(replay.json().replayedFromDeliveryId).toBe(original.id);
+    expect(store.deliveries).toHaveLength(2);
+
+    const invalidReplay = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/deliveries/${replay.json().delivery.id}/replay`,
+      headers,
+    });
+    expect(invalidReplay.statusCode).toBe(409);
+    expect(invalidReplay.json().error.code).toBe("DELIVERY_NOT_FAILED");
+  });
 });

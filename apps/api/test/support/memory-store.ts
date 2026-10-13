@@ -5,6 +5,11 @@ import type {
   EncryptedSecretRecord,
   EndpointRecord,
   EndpointStatus,
+  DeliveryAttemptRecord,
+  DeliveryDetail,
+  DeliveryListFilter,
+  DeliveryListResult,
+  DeliverySummary,
   EventRecord,
   HookForgeStore,
   IngestEventResult,
@@ -21,13 +26,8 @@ function now(): string {
 export class MemoryStore implements HookForgeStore {
   public readonly secrets = new Map<string, EncryptedSecretRecord[]>();
   public readonly events = new Map<string, EventRecord>();
-  public readonly deliveries: Array<{
-    eventId: string;
-    endpointId: string;
-    endpointUrl: string;
-    endpointSecretVersion: number;
-    status: "pending";
-  }> = [];
+  public readonly deliveries: DeliverySummary[] = [];
+  public readonly attempts = new Map<string, DeliveryAttemptRecord[]>();
   private readonly users = new Map<string, UserRecord>();
   private readonly sessions = new Map<
     string,
@@ -366,11 +366,23 @@ export class MemoryStore implements HookForgeStore {
     );
     for (const endpoint of activeEndpoints) {
       this.deliveries.push({
+        id: randomUUID(),
+        projectId: input.projectId,
         eventId: event.id,
+        eventType: event.eventType,
         endpointId: endpoint.id,
+        endpointName: endpoint.name,
         endpointUrl: endpoint.url,
-        endpointSecretVersion: endpoint.currentSecretVersion,
         status: "pending",
+        attemptCount: 0,
+        nextAttemptAt: now(),
+        lastHttpStatusCode: null,
+        lastError: null,
+        createdAt: event.createdAt,
+        updatedAt: event.createdAt,
+        completedAt: null,
+        replayOfDeliveryId: null,
+        replayNumber: 0,
       });
     }
 
@@ -379,5 +391,138 @@ export class MemoryStore implements HookForgeStore {
       deliveryCount: activeEndpoints.length,
       deduplicated: false,
     };
+  }
+
+  public async listDeliveries(
+    ownerId: string,
+    projectId: string,
+    filter: DeliveryListFilter,
+  ): Promise<DeliveryListResult> {
+    if (!(await this.getProject(ownerId, projectId))) {
+      return { deliveries: [], nextCursor: null };
+    }
+    const filtered = this.deliveries
+      .filter((delivery) => {
+        if (delivery.projectId !== projectId) return false;
+        if (filter.status && delivery.status !== filter.status) return false;
+        if (filter.endpointId && delivery.endpointId !== filter.endpointId)
+          return false;
+        if (filter.eventType && delivery.eventType !== filter.eventType)
+          return false;
+        if (
+          filter.from &&
+          Date.parse(delivery.createdAt) < filter.from.getTime()
+        )
+          return false;
+        if (filter.to && Date.parse(delivery.createdAt) >= filter.to.getTime())
+          return false;
+        if (filter.cursor) {
+          const afterCursor =
+            delivery.createdAt < filter.cursor.createdAt ||
+            (delivery.createdAt === filter.cursor.createdAt &&
+              delivery.id < filter.cursor.id);
+          if (!afterCursor) return false;
+        }
+        return true;
+      })
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.id.localeCompare(left.id),
+      );
+    const hasMore = filtered.length > filter.limit;
+    const deliveries = hasMore ? filtered.slice(0, filter.limit) : filtered;
+    const last = deliveries.at(-1);
+    return {
+      deliveries,
+      nextCursor:
+        hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+    };
+  }
+
+  public async getDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliveryDetail | null> {
+    if (!(await this.getProject(ownerId, projectId))) return null;
+    const delivery = this.deliveries.find(
+      (candidate) =>
+        candidate.id === deliveryId && candidate.projectId === projectId,
+    );
+    if (!delivery) return null;
+    const event = this.events.get(delivery.eventId);
+    if (!event) return null;
+    return {
+      delivery,
+      eventPayload: event.payload,
+      attempts: this.attempts.get(delivery.id) ?? [],
+    };
+  }
+
+  public async replayDelivery(
+    ownerId: string,
+    projectId: string,
+    deliveryId: string,
+  ): Promise<DeliverySummary | null> {
+    if (!(await this.getProject(ownerId, projectId))) return null;
+    const source = this.deliveries.find(
+      (candidate) =>
+        candidate.id === deliveryId && candidate.projectId === projectId,
+    );
+    if (!source) return null;
+    if (source.status !== "failed") {
+      throw conflict(
+        "DELIVERY_NOT_FAILED",
+        "Only terminally failed deliveries can be replayed",
+      );
+    }
+    const endpoint = this.endpoints.get(source.endpointId);
+    if (!endpoint || endpoint.status !== "active") {
+      throw conflict(
+        "ENDPOINT_NOT_ACTIVE",
+        "The endpoint must be active before a delivery can be replayed",
+      );
+    }
+    const event = this.events.get(source.eventId)!;
+    const replayNumber =
+      Math.max(
+        ...this.deliveries
+          .filter(
+            (candidate) =>
+              candidate.eventId === source.eventId &&
+              candidate.endpointId === source.endpointId,
+          )
+          .map((candidate) => candidate.replayNumber),
+      ) + 1;
+    const replay: DeliverySummary = {
+      id: randomUUID(),
+      projectId,
+      eventId: source.eventId,
+      eventType: event.eventType,
+      endpointId: endpoint.id,
+      endpointName: endpoint.name,
+      endpointUrl: endpoint.url,
+      status: "pending",
+      attemptCount: 0,
+      nextAttemptAt: now(),
+      lastHttpStatusCode: null,
+      lastError: null,
+      createdAt: now(),
+      updatedAt: now(),
+      completedAt: null,
+      replayOfDeliveryId: source.id,
+      replayNumber,
+    };
+    this.deliveries.push(replay);
+    return replay;
+  }
+
+  public async reconcileExpiredDeliveries(
+    ownerId: string,
+    projectId: string,
+  ): Promise<number> {
+    if (!(await this.getProject(ownerId, projectId))) return 0;
+    return 0;
   }
 }

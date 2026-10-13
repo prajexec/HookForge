@@ -8,8 +8,8 @@ PostgreSQL remains the authoritative store for all durable delivery state.
 
 The repository currently implements service health, readiness, runtime metrics,
 authentication, project ownership, endpoint lifecycle management, event
-persistence, idempotency, durable delivery scheduling, and the initial worker
-delivery path. Delivery inspection and replay APIs remain later milestones.
+persistence, idempotency, durable delivery scheduling, worker delivery, and
+delivery inspection/replay APIs.
 
 ## Components
 
@@ -77,6 +77,12 @@ crash after claiming leaves the row leased until expiration; the next claim
 returns it to `pending` and can deliver it again. Every completed HTTP attempt
 is stored in `delivery_attempts`, including response status, bounded excerpt,
 duration, classification, and outcome.
+
+Replay never resets an existing delivery. It creates a new delivery with the
+same event and endpoint, links it through `replay_of_delivery_id`, increments
+the per-event/endpoint replay number, and snapshots the endpoint's current
+configuration. This keeps original attempts auditable and prevents replay from
+mutating historical results.
 
 Outbound requests use a deadline, disable redirects by default, bound response
 body reads, and validate the endpoint again at delivery time to reduce SSRF
