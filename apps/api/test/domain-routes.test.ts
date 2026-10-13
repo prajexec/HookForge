@@ -21,9 +21,12 @@ function dependencies(store: MemoryStore): AppDependencies {
   };
 }
 
-async function createApplication(store = new MemoryStore()) {
+async function createApplication(
+  store = new MemoryStore(),
+  appConfig = config,
+) {
   const app = await buildApp({
-    config,
+    config: appConfig,
     dependencies: dependencies(store),
     endpointUrlValidator: { validate: async (url) => url },
     logger: false,
@@ -201,5 +204,135 @@ describe("authenticated project and endpoint management", () => {
       headers: { authorization: `Bearer ${loginToken}` },
     });
     expect(me.statusCode).toBe(401);
+  });
+
+  it("persists an event and fans it out only to active endpoints", async () => {
+    const { app, store } = await createApplication();
+    const user = await register(app, "events@example.com");
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: { name: "Events" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+    const headers = { authorization: `Bearer ${user.token}` };
+
+    const activeEndpoint = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: { name: "Active", url: "https://example.com/active" },
+    });
+    const pausedEndpoint = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: { name: "Paused", url: "https://example.com/paused" },
+    });
+    const pausedEndpointId = pausedEndpoint.json().endpoint.id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints/${pausedEndpointId}/pause`,
+      headers,
+    });
+
+    const event = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers: { ...headers, "idempotency-key": "payment-1" },
+      payload: {
+        eventType: "payment.created",
+        payload: { amount: 1250, paymentId: "pay_123" },
+      },
+    });
+    expect(event.statusCode).toBe(202);
+    expect(event.json()).toMatchObject({
+      deliveriesScheduled: 1,
+      deduplicated: false,
+    });
+    expect(store.events.size).toBe(1);
+    expect(store.deliveries).toHaveLength(1);
+    expect(store.deliveries[0]?.endpointId).toBe(
+      activeEndpoint.json().endpoint.id,
+    );
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers: { ...headers, "idempotency-key": "payment-1" },
+      payload: {
+        eventType: "payment.created",
+        payload: { paymentId: "pay_123", amount: 1250 },
+      },
+    });
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.json().deduplicated).toBe(true);
+    expect(duplicate.json().event.id).toBe(event.json().event.id);
+    expect(store.events.size).toBe(1);
+    expect(store.deliveries).toHaveLength(1);
+
+    const reused = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers: { ...headers, "idempotency-key": "payment-1" },
+      payload: {
+        eventType: "payment.updated",
+        payload: { paymentId: "pay_123", amount: 1500 },
+      },
+    });
+    expect(reused.statusCode).toBe(409);
+    expect(reused.json().error.code).toBe("IDEMPOTENCY_KEY_REUSED");
+  });
+
+  it("does not allow another tenant to enqueue events for the project", async () => {
+    const { app, store } = await createApplication();
+    const owner = await register(app, "event-owner@example.com");
+    const otherUser = await register(app, "event-other@example.com");
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { name: "Private events" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers: { authorization: `Bearer ${otherUser.token}` },
+      payload: { eventType: "private.test", payload: {} },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(store.events.size).toBe(0);
+  });
+
+  it("rejects event payloads over the configured limit", async () => {
+    const { app } = await createApplication(new MemoryStore(), {
+      ...config,
+      MAX_EVENT_PAYLOAD_BYTES: 1_024,
+    });
+    const user = await register(app, "large-event@example.com");
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: { name: "Large events" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers: { authorization: `Bearer ${user.token}` },
+      payload: {
+        eventType: "large.test",
+        payload: { value: "x".repeat(2_000) },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("PAYLOAD_TOO_LARGE");
   });
 });

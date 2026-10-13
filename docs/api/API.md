@@ -59,9 +59,8 @@ domain error envelope will remain:
 }
 ```
 
-Idempotency headers, cursor pagination, rate limits, and OpenAPI generation will
-be expanded as those features are implemented. No unimplemented route is
-presented as available.
+Cursor pagination, rate limits, and OpenAPI generation will be expanded as those
+features are implemented. No unimplemented route is presented as available.
 
 ## Authentication
 
@@ -132,3 +131,37 @@ production.
 
 Pagination is currently bounded-limit only; cursor pagination will be added
 with delivery inspection once those tables exist.
+
+## Event ingestion
+
+### `POST /api/v1/projects/{projectId}/events`
+
+Requires a bearer token and accepts:
+
+```json
+{
+  "eventType": "payment.created",
+  "payload": {
+    "paymentId": "pay_123",
+    "amount": 1250
+  }
+}
+```
+
+The payload must be valid JSON and is limited by `MAX_EVENT_PAYLOAD_BYTES`
+(128 KiB by default). The API persists the event and creates one `pending`
+delivery row for every endpoint that is active at commit time. Paused and
+disabled endpoints are not scheduled. The response is `202 Accepted` and does
+not wait for an HTTP receiver.
+
+Send an optional `Idempotency-Key` header to safely retry ingestion. The key is
+scoped to the project and the request fingerprint includes `eventType` and a
+canonical JSON representation of `payload`. Repeating the same key and request
+returns `200` with the original event ID and `deduplicated: true`. Reusing a key
+with a different request returns `409 IDEMPOTENCY_KEY_REUSED`. Requests without
+the header always create a new event.
+
+The transaction locks the owned project row, inserts the event, records the
+idempotency key when present, snapshots active endpoint URLs and secret versions,
+and inserts delivery rows before committing. A committed accepted event
+therefore cannot be acknowledged without its durable initial delivery work.

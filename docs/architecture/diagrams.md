@@ -25,7 +25,7 @@ sequenceDiagram
   participant P as PostgreSQL
   participant W as Worker
   participant R as Receiver
-  Note over A,W: Future delivery milestone
+  Note over A: Event and initial delivery rows commit atomically
   C->>A: POST /api/v1/projects/{id}/events
   A->>P: BEGIN; insert idempotency key, event, deliveries
   P-->>A: COMMIT

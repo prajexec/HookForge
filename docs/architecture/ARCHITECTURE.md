@@ -7,9 +7,9 @@ worker processes. Both processes share typed modules and SQL migrations, while
 PostgreSQL remains the authoritative store for all durable delivery state.
 
 The repository currently implements service health, readiness, runtime metrics,
-authentication, project ownership, endpoint lifecycle management, and the
-initial domain schema. Event persistence and delivery flows below describe the
-accepted next milestones.
+authentication, project ownership, endpoint lifecycle management, event
+persistence, idempotency, and initial durable delivery scheduling. The worker
+delivery portion remains a later milestone.
 
 ## Components
 
@@ -36,17 +36,25 @@ configuration.
 
 ## Queue and transaction boundary
 
-The delivery queue is a PostgreSQL-backed table. Event ingestion inserts the
-event, its idempotency record, and one delivery row per eligible endpoint in a
-single transaction. A worker claims a due row using a short transaction and
-`FOR UPDATE SKIP LOCKED`, sets a lease, and commits before making the outbound
-request. A second transaction records the attempt and either marks the
-delivery terminal or assigns its next due time.
+The delivery queue is a PostgreSQL-backed table. Event ingestion locks the owned
+project row, then inserts the event, its idempotency record, and one delivery
+row per active endpoint in a single transaction. Each delivery snapshots the
+endpoint URL and secret version so later endpoint edits do not alter already
+accepted work. A future worker will claim a due row using a short transaction
+and `FOR UPDATE SKIP LOCKED`, set a lease, and commit before making the outbound
+request. A second transaction will record the attempt and either mark the
+delivery terminal or assign its next due time.
 
 This removes the database/queue dual-write problem: a committed event always
 has durable delivery rows. It also avoids requiring a second durable queue
 implementation on a resource-constrained laptop. Redis is not used as a
 delivery queue.
+
+Idempotency keys are scoped to a project and store a SHA-256 fingerprint of the
+event type plus canonical payload. A repeated matching request returns the
+original event and delivery count; a mismatched request is rejected. Project
+row locking serializes concurrent idempotency checks for the same project while
+keeping unrelated projects independent.
 
 ## Delivery guarantees
 

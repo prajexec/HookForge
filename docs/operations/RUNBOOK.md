@@ -25,6 +25,10 @@ Run `npm run db:migrate` against the configured database before starting a new
 application version. Back up PostgreSQL before production migrations. The local
 named volume is `hookforge_postgres_data`; it is never deleted automatically.
 
+Run `npm run test:integration` after starting local PostgreSQL to verify the
+event transaction, idempotency behavior, active-endpoint fan-out, and rollback
+against the real schema.
+
 ## Logs and disk
 
 Use `docker compose logs --tail=100 postgres redis` for dependency diagnostics

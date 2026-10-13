@@ -4,6 +4,9 @@ import { conflict, notFound } from "./errors.js";
 
 export type EndpointStatus = "active" | "paused" | "disabled";
 
+export type JsonValue =
+  null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
 export interface UserRecord {
   id: string;
   email: string;
@@ -39,6 +42,20 @@ export interface EndpointRecord {
   lastSuccessfulDeliveryAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface EventRecord {
+  id: string;
+  projectId: string;
+  eventType: string;
+  payload: JsonValue;
+  createdAt: string;
+}
+
+export interface IngestEventResult {
+  event: EventRecord;
+  deliveryCount: number;
+  deduplicated: boolean;
 }
 
 export interface EncryptedSecretRecord {
@@ -105,6 +122,14 @@ export interface HookForgeStore {
     endpointId: string,
     secret: EncryptedSecretRecord,
   ): Promise<EndpointRecord | null>;
+  ingestEvent(input: {
+    ownerId: string;
+    projectId: string;
+    eventType: string;
+    payload: JsonValue;
+    idempotencyKey?: string;
+    requestHash: string;
+  }): Promise<IngestEventResult>;
 }
 
 type DatabaseRow = QueryResultRow & Record<string, unknown>;
@@ -143,6 +168,16 @@ function mapEndpoint(row: DatabaseRow): EndpointRecord {
       : null,
     createdAt: new Date(String(row.created_at)).toISOString(),
     updatedAt: new Date(String(row.updated_at)).toISOString(),
+  };
+}
+
+function mapEvent(row: DatabaseRow): EventRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    eventType: String(row.event_type),
+    payload: row.payload as JsonValue,
+    createdAt: new Date(String(row.created_at)).toISOString(),
   };
 }
 
@@ -323,6 +358,106 @@ export class PgStore implements HookForgeStore {
       [projectId, ownerId],
     );
     return result.rows[0] ? mapProject(result.rows[0]) : null;
+  }
+
+  public async ingestEvent(input: {
+    ownerId: string;
+    projectId: string;
+    eventType: string;
+    payload: JsonValue;
+    idempotencyKey?: string;
+    requestHash: string;
+  }): Promise<IngestEventResult> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const project = await client.query<DatabaseRow>(
+        "SELECT id FROM projects WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+        [input.projectId, input.ownerId],
+      );
+      if (project.rowCount === 0) {
+        throw notFound();
+      }
+
+      if (input.idempotencyKey !== undefined) {
+        const existing = await client.query<DatabaseRow>(
+          `SELECT request_hash, event_id
+           FROM event_idempotency_keys
+           WHERE project_id = $1 AND idempotency_key = $2
+           FOR UPDATE`,
+          [input.projectId, input.idempotencyKey],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow) {
+          if (String(existingRow.request_hash) !== input.requestHash) {
+            throw conflict(
+              "IDEMPOTENCY_KEY_REUSED",
+              "Idempotency-Key was already used with a different event",
+            );
+          }
+          const event = await client.query<DatabaseRow>(
+            `SELECT id, project_id, event_type, payload, created_at
+             FROM events WHERE id = $1`,
+            [existingRow.event_id],
+          );
+          const deliveries = await client.query<{ count: string }>(
+            "SELECT COUNT(*)::text AS count FROM deliveries WHERE event_id = $1",
+            [existingRow.event_id],
+          );
+          await client.query("COMMIT");
+          return {
+            event: mapEvent(event.rows[0]!),
+            deliveryCount: Number(deliveries.rows[0]?.count ?? 0),
+            deduplicated: true,
+          };
+        }
+      }
+
+      const event = await client.query<DatabaseRow>(
+        `INSERT INTO events (project_id, event_type, payload)
+         VALUES ($1, $2, $3)
+         RETURNING id, project_id, event_type, payload, created_at`,
+        [input.projectId, input.eventType, input.payload],
+      );
+      const eventRow = event.rows[0]!;
+
+      if (input.idempotencyKey !== undefined) {
+        await client.query(
+          `INSERT INTO event_idempotency_keys
+             (project_id, idempotency_key, request_hash, event_id)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            input.projectId,
+            input.idempotencyKey,
+            input.requestHash,
+            eventRow.id,
+          ],
+        );
+      }
+
+      const deliveries = await client.query(
+        `INSERT INTO deliveries
+           (event_id, endpoint_id, endpoint_url, endpoint_secret_version)
+         SELECT $1, e.id, e.url, e.current_secret_version
+         FROM endpoints e
+         WHERE e.project_id = $2 AND e.status = 'active'
+         ORDER BY e.id
+         FOR SHARE
+         RETURNING id`,
+        [eventRow.id, input.projectId],
+      );
+      await client.query("COMMIT");
+      return {
+        event: mapEvent(eventRow),
+        deliveryCount: deliveries.rowCount ?? 0,
+        deduplicated: false,
+      };
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   public async createEndpoint(input: {

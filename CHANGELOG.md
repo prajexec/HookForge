@@ -14,3 +14,5 @@
   and tenant-scoped APIs.
 - Added scrypt password hashing, opaque bearer authentication, SSRF-aware URL
   validation, endpoint lifecycle actions, and 20 automated tests.
+- Added event ingestion with canonical idempotency keys, payload limits, active
+  endpoint fan-out, endpoint configuration snapshots, and durable delivery rows.

@@ -16,6 +16,9 @@
   object belonging to another user is returned as `404`.
 - Endpoint URL registration and update reject non-HTTP(S) schemes, credentials,
   fragments, blocked hostnames, and DNS resolutions into private address ranges.
+- Event bodies are bounded by Fastify's request limit and the configured
+  `MAX_EVENT_PAYLOAD_BYTES` limit; idempotency fingerprints prevent accidental
+  duplicate fan-out when clients retry an accepted request.
 
 ## Planned security boundaries
 

@@ -23,6 +23,12 @@ const environmentSchema = z.object({
     .min(300)
     .max(2_592_000)
     .default(86_400),
+  MAX_EVENT_PAYLOAD_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1_024)
+    .max(200_000)
+    .default(131_072),
   SECRET_ENCRYPTION_KEY: z
     .string()
     .regex(/^[A-Za-z0-9+/]+={0,2}$/, "must be base64")

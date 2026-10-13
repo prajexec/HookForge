@@ -18,13 +18,13 @@ The repository currently contains the foundation milestone:
 - PostgreSQL domain schema for users, sessions, projects, endpoints, and
   encrypted secret versions.
 - Bearer-token authentication and tenant-scoped project/endpoint APIs.
+- Idempotent event ingestion with atomic delivery fan-out for active endpoints.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, and URL policy.
 
-Event ingestion, durable delivery rows, the worker queue, signed HTTP delivery,
-retries, dashboard data views, and OpenAPI generation are deliberately
-introduced in later tested milestones.
+The delivery worker, signed HTTP delivery, retries, dashboard data views, and
+OpenAPI generation are deliberately introduced in later tested milestones.
 
 ## Architecture direction
 
@@ -88,6 +88,7 @@ npm run format:check
 npm run lint
 npm run typecheck
 npm test
+npm run test:integration
 npm run build
 npm run compose:logs
 npm run compose:down
@@ -124,8 +125,12 @@ real API-backed dashboard milestone.
 
 ## Current limitations and roadmap
 
-The current milestone does not yet accept events or deliver HTTP requests.
-The next milestones add idempotent event ingestion, durable delivery rows, the
-worker, signed delivery and retries, replay, and the API-backed dashboard.
+The current milestone accepts and durably schedules events but does not yet
+deliver HTTP requests. The next milestones add the worker, signed delivery and
+retries, replay, and the API-backed dashboard.
+
+`npm test` runs fast in-memory unit and route tests. Once PostgreSQL and Redis
+are running, `npm run test:integration` applies migrations and runs the real
+PostgreSQL event-ingestion checks.
 Benchmarks will be added only after delivery is functional and will report
 measured values with their test environment.

@@ -10,6 +10,7 @@ import type { AppDependencies } from "./dependencies.js";
 import { AppError } from "./errors.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerEndpointRoutes } from "./routes/endpoints.js";
+import { registerEventRoutes } from "./routes/events.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import type { EndpointUrlValidator } from "./security/url.js";
 import { Metrics } from "./metrics.js";
@@ -78,6 +79,11 @@ export async function buildApp({
     config,
     store: dependencies.store,
     ...(endpointUrlValidator ? { urlValidator: endpointUrlValidator } : {}),
+  });
+  await registerEventRoutes(app, {
+    config,
+    store: dependencies.store,
+    metrics,
   });
 
   app.setErrorHandler((error, request, reply) => {

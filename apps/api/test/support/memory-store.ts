@@ -5,7 +5,10 @@ import type {
   EncryptedSecretRecord,
   EndpointRecord,
   EndpointStatus,
+  EventRecord,
   HookForgeStore,
+  IngestEventResult,
+  JsonValue,
   ProjectRecord,
   SessionRecord,
   UserRecord,
@@ -17,6 +20,14 @@ function now(): string {
 
 export class MemoryStore implements HookForgeStore {
   public readonly secrets = new Map<string, EncryptedSecretRecord[]>();
+  public readonly events = new Map<string, EventRecord>();
+  public readonly deliveries: Array<{
+    eventId: string;
+    endpointId: string;
+    endpointUrl: string;
+    endpointSecretVersion: number;
+    status: "pending";
+  }> = [];
   private readonly users = new Map<string, UserRecord>();
   private readonly sessions = new Map<
     string,
@@ -24,6 +35,10 @@ export class MemoryStore implements HookForgeStore {
   >();
   private readonly projects = new Map<string, ProjectRecord>();
   private readonly endpoints = new Map<string, EndpointRecord>();
+  private readonly idempotency = new Map<
+    string,
+    { requestHash: string; eventId: string }
+  >();
 
   public async createUser(input: {
     email: string;
@@ -292,5 +307,77 @@ export class MemoryStore implements HookForgeStore {
       secret,
     ]);
     return endpoint;
+  }
+
+  public async ingestEvent(input: {
+    ownerId: string;
+    projectId: string;
+    eventType: string;
+    payload: JsonValue;
+    idempotencyKey?: string;
+    requestHash: string;
+  }): Promise<IngestEventResult> {
+    if (!(await this.getProject(input.ownerId, input.projectId))) {
+      throw notFound();
+    }
+
+    const key =
+      input.idempotencyKey === undefined
+        ? undefined
+        : `${input.projectId}:${input.idempotencyKey}`;
+    if (key !== undefined) {
+      const existing = this.idempotency.get(key);
+      if (existing) {
+        if (existing.requestHash !== input.requestHash) {
+          throw conflict(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Idempotency-Key was already used with a different event",
+          );
+        }
+        const event = this.events.get(existing.eventId)!;
+        return {
+          event,
+          deliveryCount: this.deliveries.filter(
+            (delivery) => delivery.eventId === event.id,
+          ).length,
+          deduplicated: true,
+        };
+      }
+    }
+
+    const event: EventRecord = {
+      id: randomUUID(),
+      projectId: input.projectId,
+      eventType: input.eventType,
+      payload: input.payload,
+      createdAt: now(),
+    };
+    this.events.set(event.id, event);
+    if (key !== undefined) {
+      this.idempotency.set(key, {
+        requestHash: input.requestHash,
+        eventId: event.id,
+      });
+    }
+
+    const activeEndpoints = [...this.endpoints.values()].filter(
+      (endpoint) =>
+        endpoint.projectId === input.projectId && endpoint.status === "active",
+    );
+    for (const endpoint of activeEndpoints) {
+      this.deliveries.push({
+        eventId: event.id,
+        endpointId: endpoint.id,
+        endpointUrl: endpoint.url,
+        endpointSecretVersion: endpoint.currentSecretVersion,
+        status: "pending",
+      });
+    }
+
+    return {
+      event,
+      deliveryCount: activeEndpoints.length,
+      deduplicated: false,
+    };
   }
 }
