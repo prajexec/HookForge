@@ -7,6 +7,9 @@ import type {
   EndpointStatus,
   DeliveryAttemptRecord,
   DeliveryDetail,
+  EventListFilter,
+  EventListResult,
+  EventSummary,
   DeliveryListFilter,
   DeliveryListResult,
   DeliverySummary,
@@ -15,12 +18,22 @@ import type {
   IngestEventResult,
   JsonValue,
   ProjectRecord,
+  ProjectOverview,
   SessionRecord,
   UserRecord,
 } from "../../src/store.js";
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function eventTimestamp(value: string): string {
+  // Match the production cursor's fixed-width UTC representation without
+  // losing sub-millisecond digits through Date.
+  return value.replace(
+    /\.(\d{3,6})Z$/,
+    (_match, fraction: string) => `.${fraction.padEnd(6, "0")}Z`,
+  );
 }
 
 export class MemoryStore implements HookForgeStore {
@@ -170,6 +183,46 @@ export class MemoryStore implements HookForgeStore {
   ): Promise<ProjectRecord | null> {
     const project = this.projects.get(projectId);
     return project?.ownerId === ownerId ? project : null;
+  }
+
+  public async getProjectOverview(
+    ownerId: string,
+    projectId: string,
+  ): Promise<ProjectOverview | null> {
+    if (!(await this.getProject(ownerId, projectId))) {
+      return null;
+    }
+    const endpoints = [...this.endpoints.values()].filter(
+      (endpoint) => endpoint.projectId === projectId,
+    );
+    const deliveries = this.deliveries.filter(
+      (delivery) => delivery.projectId === projectId,
+    );
+    return {
+      events: [...this.events.values()].filter(
+        (event) => event.projectId === projectId,
+      ).length,
+      endpoints: {
+        active: endpoints.filter((endpoint) => endpoint.status === "active")
+          .length,
+        paused: endpoints.filter((endpoint) => endpoint.status === "paused")
+          .length,
+        disabled: endpoints.filter((endpoint) => endpoint.status === "disabled")
+          .length,
+      },
+      deliveries: {
+        pending: deliveries.filter((delivery) => delivery.status === "pending")
+          .length,
+        in_flight: deliveries.filter(
+          (delivery) => delivery.status === "in_flight",
+        ).length,
+        delivered: deliveries.filter(
+          (delivery) => delivery.status === "delivered",
+        ).length,
+        failed: deliveries.filter((delivery) => delivery.status === "failed")
+          .length,
+      },
+    };
   }
 
   public async createEndpoint(input: {
@@ -390,6 +443,52 @@ export class MemoryStore implements HookForgeStore {
       event,
       deliveryCount: activeEndpoints.length,
       deduplicated: false,
+    };
+  }
+
+  public async listEvents(
+    ownerId: string,
+    projectId: string,
+    filter: EventListFilter,
+  ): Promise<EventListResult | null> {
+    if (!(await this.getProject(ownerId, projectId))) {
+      return null;
+    }
+    const filtered = [...this.events.values()]
+      .filter((event) => {
+        if (event.projectId !== projectId) return false;
+        if (filter.eventType && event.eventType !== filter.eventType)
+          return false;
+        if (filter.cursor) {
+          const createdAt = eventTimestamp(event.createdAt);
+          const afterCursor =
+            createdAt < filter.cursor.createdAt ||
+            (createdAt === filter.cursor.createdAt &&
+              event.id < filter.cursor.id);
+          if (!afterCursor) return false;
+        }
+        return true;
+      })
+      .sort(
+        (left, right) =>
+          eventTimestamp(right.createdAt).localeCompare(
+            eventTimestamp(left.createdAt),
+          ) || right.id.localeCompare(left.id),
+      );
+    const hasMore = filtered.length > filter.limit;
+    const events = hasMore ? filtered.slice(0, filter.limit) : filtered;
+    const last = events.at(-1);
+    return {
+      events: events.map((event): EventSummary => ({
+        id: event.id,
+        projectId: event.projectId,
+        eventType: event.eventType,
+        createdAt: event.createdAt,
+      })),
+      nextCursor:
+        hasMore && last
+          ? { createdAt: eventTimestamp(last.createdAt), id: last.id }
+          : null,
     };
   }
 

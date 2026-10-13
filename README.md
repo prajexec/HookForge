@@ -23,12 +23,13 @@ The repository currently contains the foundation milestone:
   retry scheduling, attempt history, and abandoned-lease recovery.
 - Paginated delivery inspection, attempt-history detail, replay, and lease
   reconciliation APIs.
+- API-backed React dashboard for projects, endpoints, events, and deliveries.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, and URL policy.
 
-Dashboard data views, Dockerized application services, and OpenAPI generation
-are deliberately introduced in later tested milestones.
+Dockerized application services and OpenAPI generation are deliberately
+introduced in later tested milestones.
 
 ## Architecture direction
 
@@ -78,8 +79,9 @@ on the host, use the debug override, which binds both ports only to loopback:
 docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 ```
 
-The web foundation can be started in a second terminal with
-`npm run dev:web` and is available at `http://localhost:5173`.
+The dashboard can be started in a second terminal with `npm run dev:web` and is
+available at `http://localhost:5173`. Vite proxies relative `/api` requests to
+the host API at `http://localhost:3000` during development.
 
 The local `.env.example` encryption key is intentionally a known development
 value. Replace it before sharing a development environment or deploying

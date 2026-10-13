@@ -52,6 +52,45 @@ export interface EventRecord {
   createdAt: string;
 }
 
+export interface EventSummary {
+  id: string;
+  projectId: string;
+  eventType: string;
+  createdAt: string;
+}
+
+export interface EventCursor {
+  // Canonical UTC timestamp with all six PostgreSQL fractional digits.
+  createdAt: string;
+  id: string;
+}
+
+export interface EventListFilter {
+  limit: number;
+  eventType?: string;
+  cursor?: EventCursor;
+}
+
+export interface EventListResult {
+  events: EventSummary[];
+  nextCursor: EventCursor | null;
+}
+
+export interface ProjectOverview {
+  events: number;
+  endpoints: {
+    active: number;
+    paused: number;
+    disabled: number;
+  };
+  deliveries: {
+    pending: number;
+    in_flight: number;
+    delivered: number;
+    failed: number;
+  };
+}
+
 export interface IngestEventResult {
   event: EventRecord;
   deliveryCount: number;
@@ -146,6 +185,10 @@ export interface HookForgeStore {
   }): Promise<ProjectRecord>;
   listProjects(ownerId: string, limit: number): Promise<ProjectRecord[]>;
   getProject(ownerId: string, projectId: string): Promise<ProjectRecord | null>;
+  getProjectOverview(
+    ownerId: string,
+    projectId: string,
+  ): Promise<ProjectOverview | null>;
   createEndpoint(input: {
     ownerId: string;
     projectId: string;
@@ -190,6 +233,11 @@ export interface HookForgeStore {
     idempotencyKey?: string;
     requestHash: string;
   }): Promise<IngestEventResult>;
+  listEvents(
+    ownerId: string,
+    projectId: string,
+    filter: EventListFilter,
+  ): Promise<EventListResult | null>;
   listDeliveries(
     ownerId: string,
     projectId: string,
@@ -257,6 +305,15 @@ function mapEvent(row: DatabaseRow): EventRecord {
     eventType: String(row.event_type),
     payload: row.payload as JsonValue,
     createdAt: new Date(String(row.created_at)).toISOString(),
+  };
+}
+
+function mapEventSummary(row: DatabaseRow): EventSummary {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    eventType: String(row.event_type),
+    createdAt: new Date(String(row.created_at_cursor)).toISOString(),
   };
 }
 
@@ -506,6 +563,57 @@ export class PgStore implements HookForgeStore {
     return result.rows[0] ? mapProject(result.rows[0]) : null;
   }
 
+  public async getProjectOverview(
+    ownerId: string,
+    projectId: string,
+  ): Promise<ProjectOverview | null> {
+    // Keep each metric independent so endpoint/event/delivery joins cannot
+    // multiply rows before they are counted.
+    const result = await this.pool.query<DatabaseRow>(
+      `SELECT
+         (SELECT COUNT(*) FROM events e WHERE e.project_id = p.id) AS events_count,
+         ep.endpoints_active, ep.endpoints_paused, ep.endpoints_disabled,
+         d.deliveries_pending, d.deliveries_in_flight,
+         d.deliveries_delivered, d.deliveries_failed
+       FROM projects p
+       CROSS JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE status = 'active') AS endpoints_active,
+                COUNT(*) FILTER (WHERE status = 'paused') AS endpoints_paused,
+                COUNT(*) FILTER (WHERE status = 'disabled') AS endpoints_disabled
+         FROM endpoints WHERE project_id = p.id
+       ) ep
+       CROSS JOIN LATERAL (
+         SELECT COUNT(*) FILTER (WHERE d.status = 'pending') AS deliveries_pending,
+                COUNT(*) FILTER (WHERE d.status = 'in_flight') AS deliveries_in_flight,
+                COUNT(*) FILTER (WHERE d.status = 'delivered') AS deliveries_delivered,
+                COUNT(*) FILTER (WHERE d.status = 'failed') AS deliveries_failed
+         FROM deliveries d
+         JOIN events e ON e.id = d.event_id
+         WHERE e.project_id = p.id
+       ) d
+       WHERE p.id = $1 AND p.owner_id = $2`,
+      [projectId, ownerId],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    return {
+      events: Number(row.events_count),
+      endpoints: {
+        active: Number(row.endpoints_active),
+        paused: Number(row.endpoints_paused),
+        disabled: Number(row.endpoints_disabled),
+      },
+      deliveries: {
+        pending: Number(row.deliveries_pending),
+        in_flight: Number(row.deliveries_in_flight),
+        delivered: Number(row.deliveries_delivered),
+        failed: Number(row.deliveries_failed),
+      },
+    };
+  }
+
   public async ingestEvent(input: {
     ownerId: string;
     projectId: string;
@@ -604,6 +712,63 @@ export class PgStore implements HookForgeStore {
     } finally {
       client.release();
     }
+  }
+
+  public async listEvents(
+    ownerId: string,
+    projectId: string,
+    filter: EventListFilter,
+  ): Promise<EventListResult | null> {
+    const project = await this.getProject(ownerId, projectId);
+    if (!project) {
+      return null;
+    }
+
+    const values: unknown[] = [projectId, ownerId];
+    const conditions = ["e.project_id = $1", "p.owner_id = $2"];
+    const addValue = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+
+    if (filter.eventType) {
+      conditions.push(`e.event_type = ${addValue(filter.eventType)}`);
+    }
+    if (filter.cursor) {
+      const cursorCreatedAt = addValue(filter.cursor.createdAt);
+      const cursorId = addValue(filter.cursor.id);
+      conditions.push(
+        `(e.created_at, e.id) < (${cursorCreatedAt}::timestamptz, ${cursorId}::uuid)`,
+      );
+    }
+
+    const limitParameter = addValue(filter.limit + 1);
+    const result = await this.pool.query<DatabaseRow>(
+      // Text bypasses pg's Date parser, which truncates microseconds. Never
+      // derive the cursor from the display timestamp in mapEventSummary.
+      `SELECT e.id, e.project_id, e.event_type,
+              to_char(e.created_at AT TIME ZONE 'UTC',
+                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at_cursor
+       FROM events e
+       JOIN projects p ON p.id = e.project_id
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY e.created_at DESC, e.id DESC
+       LIMIT ${limitParameter}`,
+      values,
+    );
+    const hasMore = result.rows.length > filter.limit;
+    const rows = hasMore ? result.rows.slice(0, filter.limit) : result.rows;
+    const last = rows.at(-1);
+    return {
+      events: rows.map(mapEventSummary),
+      nextCursor:
+        hasMore && last
+          ? {
+              createdAt: String(last.created_at_cursor),
+              id: String(last.id),
+            }
+          : null,
+    };
   }
 
   public async createEndpoint(input: {

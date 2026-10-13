@@ -10,7 +10,8 @@ const projectSchema = z.object({
   name: z.string().trim().min(1).max(120),
 });
 
-const projectParamsSchema = z.object({ projectId: z.string().uuid() });
+const projectParamsSchema = z.object({ projectId: z.string().uuid() }).strict();
+const emptyQuerySchema = z.object({}).strict();
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -73,5 +74,19 @@ export async function registerProjectRoutes(
     const params = parse(projectParamsSchema, request.params);
     const project = await store.getProject(auth.user.id, params.projectId);
     return reply.send({ project: projectResponse(project) });
+  });
+
+  app.get("/api/v1/projects/:projectId/overview", async (request, reply) => {
+    const auth = await authenticate(request, store);
+    const params = parse(projectParamsSchema, request.params);
+    parse(emptyQuerySchema, request.query);
+    const overview = await store.getProjectOverview(
+      auth.user.id,
+      params.projectId,
+    );
+    if (!overview) {
+      throw notFound();
+    }
+    return reply.send({ overview });
   });
 }

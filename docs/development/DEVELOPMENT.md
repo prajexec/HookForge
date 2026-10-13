@@ -42,8 +42,10 @@ npm run build
 ```
 
 Run `npm run dev:api`, `npm run start:worker` (after building), and
-`npm run dev:web` in separate terminals. Unit and route tests use in-memory
-dependency doubles and do not require internet access. The integration command
+`npm run dev:web` in separate terminals. Vite proxies `/api` to the host API;
+the dashboard keeps bearer tokens in memory only and does not use browser
+cookies. Unit and route tests use in-memory dependency doubles and do not
+require internet access. The integration command
 requires the local PostgreSQL service and applies all migrations before testing
 the real event and worker transactions.
 

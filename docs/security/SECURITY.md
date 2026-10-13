@@ -26,6 +26,10 @@
 - Delivery inspection, replay, and reconciliation queries are scoped through
   the authenticated project owner. Replay preserves history and does not allow
   a caller to submit an arbitrary event or endpoint ID.
+- The dashboard keeps bearer tokens in React memory only, sends them over the
+  relative same-origin API path, omits credentials/cookies, and never stores or
+  logs signing secrets. A production deployment should serve the web app and
+  API behind the same trusted origin or configure an explicit secure proxy.
 
 ## Planned security boundaries
 

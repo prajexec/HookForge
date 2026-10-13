@@ -59,8 +59,8 @@ domain error envelope will remain:
 }
 ```
 
-Cursor pagination, rate limits, and OpenAPI generation will be expanded as those
-features are implemented. No unimplemented route is presented as available.
+Rate limits and OpenAPI generation will be expanded as those features are
+implemented. No unimplemented route is presented as available.
 
 ## Authentication
 
@@ -129,8 +129,8 @@ accepting them. `ALLOW_PRIVATE_ENDPOINTS=true` is an explicit local-only
 escape hatch for a controlled test environment and must not be used in
 production.
 
-Pagination is currently bounded-limit only; cursor pagination will be added
-with delivery inspection once those tables exist.
+Endpoint lists are currently bounded to the first 100 records and use local
+dashboard search. Delivery and event lists use opaque keyset cursors.
 
 ## Event ingestion
 

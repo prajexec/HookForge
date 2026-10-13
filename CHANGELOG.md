@@ -21,3 +21,6 @@
   abandoned-lease recovery.
 - Added paginated delivery inspection, attempt-history detail, project-scoped
   replay, and expired-lease reconciliation APIs.
+- Added the API-backed React dashboard with in-memory authentication, project
+  creation, event publishing, endpoint controls, delivery filtering, attempt
+  detail, and replay actions.

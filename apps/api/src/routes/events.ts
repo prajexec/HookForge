@@ -4,16 +4,45 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
-import { badRequest } from "../errors.js";
+import { badRequest, notFound } from "../errors.js";
 import type { Metrics } from "../metrics.js";
-import type { HookForgeStore, JsonValue } from "../store.js";
+import type {
+  EventCursor,
+  EventSummary,
+  HookForgeStore,
+  JsonValue,
+} from "../store.js";
 import { authenticate } from "./auth.js";
 
-const eventParamsSchema = z.object({ projectId: z.string().uuid() });
+const eventParamsSchema = z.object({ projectId: z.string().uuid() }).strict();
 const eventBodySchema = z.object({
   eventType: z.string().trim().min(1).max(100),
   payload: z.unknown(),
 });
+const eventListQuerySchema = z
+  .object({
+    limit: z
+      .string()
+      .regex(/^[1-9]\d{0,2}$/)
+      .transform(Number)
+      .pipe(z.number().int().min(1).max(100))
+      .default(25),
+    cursor: z.string().min(1).max(512).optional(),
+    eventType: z.string().trim().min(1).max(100).optional(),
+  })
+  .strict();
+const eventCursorSchema = z
+  .object({
+    createdAt: z
+      .string()
+      .datetime({ precision: 6 })
+      .refine((value) => !value.startsWith("0000-")),
+    id: z
+      .string()
+      .uuid()
+      .transform((value) => value.toLowerCase()),
+  })
+  .strict();
 const idempotencyKeySchema = z
   .string()
   .trim()
@@ -32,6 +61,35 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
     );
   }
   return result.data;
+}
+
+function encodeCursor(cursor: EventCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeCursor(value: string): EventCursor {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) {
+      throw new Error("invalid base64url");
+    }
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) {
+      throw new Error("non-canonical base64url");
+    }
+    const decoded = JSON.parse(bytes.toString("utf8")) as unknown;
+    return parse(eventCursorSchema, decoded);
+  } catch {
+    throw badRequest("INVALID_CURSOR", "Event cursor is invalid");
+  }
+}
+
+function eventListResponse(event: EventSummary) {
+  return {
+    id: event.id,
+    projectId: event.projectId,
+    eventType: event.eventType,
+    createdAt: event.createdAt,
+  };
 }
 
 function isJsonValue(value: unknown): value is JsonValue {
@@ -88,6 +146,28 @@ export async function registerEventRoutes(
   app: FastifyInstance,
   { config, store, metrics }: RouteOptions,
 ): Promise<void> {
+  app.get("/api/v1/projects/:projectId/events", async (request, reply) => {
+    const auth = await authenticate(request, store);
+    const params = parse(eventParamsSchema, request.params);
+    const query = parse(eventListQuerySchema, request.query);
+    const cursor = query.cursor ? decodeCursor(query.cursor) : undefined;
+    const result = await store.listEvents(auth.user.id, params.projectId, {
+      limit: query.limit,
+      ...(query.eventType ? { eventType: query.eventType } : {}),
+      ...(cursor ? { cursor } : {}),
+    });
+    if (!result) {
+      throw notFound();
+    }
+    return reply.send({
+      events: result.events.map(eventListResponse),
+      pagination: {
+        limit: query.limit,
+        nextCursor: result.nextCursor ? encodeCursor(result.nextCursor) : null,
+      },
+    });
+  });
+
   app.post("/api/v1/projects/:projectId/events", async (request, reply) => {
     const auth = await authenticate(request, store);
     const params = parse(eventParamsSchema, request.params);
