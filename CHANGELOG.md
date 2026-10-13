@@ -24,3 +24,5 @@
 - Added the API-backed React dashboard with in-memory authentication, project
   creation, event publishing, endpoint controls, delivery filtering, attempt
   detail, and replay actions.
+- Added ARM64-conscious multi-stage Docker targets, Nginx API proxying, Compose
+  migration ordering, application health checks, and local service commands.

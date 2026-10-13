@@ -5,9 +5,9 @@ built incrementally to demonstrate durable event persistence, asynchronous
 delivery, HMAC signatures, retry policy, tenant isolation, and operational
 observability without requiring a heavyweight local stack.
 
-## Current milestone
+## Current implementation
 
-The repository currently contains the foundation milestone:
+The repository currently contains the following working slices:
 
 - TypeScript strict-mode npm workspace for API, worker, web, and shared code.
 - Fastify API with `/health`, `/ready`, and `/metrics`.
@@ -24,6 +24,7 @@ The repository currently contains the foundation milestone:
 - Paginated delivery inspection, attempt-history detail, replay, and lease
   reconciliation APIs.
 - API-backed React dashboard for projects, endpoints, events, and deliveries.
+- ARM64-conscious multi-stage Docker images and Compose startup orchestration.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, and URL policy.
@@ -67,21 +68,27 @@ manifests and keeps PostgreSQL and Redis resource usage conservative.
 cp .env.example .env
 npm install
 docker compose up -d
-npm run db:migrate
-npm run dev:api
 ```
 
-The initial API is available at `http://localhost:3000`. The database and Redis
-ports are intentionally private to the Compose network. To run the API directly
-on the host, use the debug override, which binds both ports only to loopback:
+Compose builds and starts the migration job, API, worker, and web dashboard.
+The dashboard is available at `http://localhost:5173`; the API is available at
+`http://localhost:3000`. PostgreSQL and Redis ports are intentionally private to
+the Compose network.
+
+To run only PostgreSQL and Redis while running the application processes on the
+host, use the debug override:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres redis
+npm run db:migrate
+npm run dev:api
+npm run start:worker
+npm run dev:web
 ```
 
-The dashboard can be started in a second terminal with `npm run dev:web` and is
-available at `http://localhost:5173`. Vite proxies relative `/api` requests to
-the host API at `http://localhost:3000` during development.
+For an explicit image rebuild, use `npm run compose:build`. Application images
+are built from the repository root and do not copy host `node_modules`, which
+keeps native dependencies compatible with Linux ARM64.
 
 The local `.env.example` encryption key is intentionally a known development
 value. Replace it before sharing a development environment or deploying
@@ -97,6 +104,8 @@ npm test
 npm run test:integration
 npm run build
 npm run compose:logs
+npm run compose:ps
+npm run compose:build
 npm run compose:down
 ```
 

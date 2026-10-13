@@ -103,12 +103,16 @@ flowchart TD
 ```mermaid
 flowchart TB
   subgraph DockerCompose[Local Docker Compose on ARM64]
-    API[API process - future image]
-    Worker[Worker process - future image]
+    Migrate[One-shot migration job]
+    API[Fastify API image]
+    Worker[Delivery worker image]
     PG[(PostgreSQL 16 Alpine)]
     Redis[(Redis 7 Alpine)]
-    Web[Frontend - future image]
+    Web[Nginx web image]
   end
+  Migrate --> PG
+  API --> Migrate
+  Worker --> Migrate
   API --> PG
   API --> Redis
   Worker --> PG

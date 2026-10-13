@@ -30,6 +30,10 @@
   relative same-origin API path, omits credentials/cookies, and never stores or
   logs signing secrets. A production deployment should serve the web app and
   API behind the same trusted origin or configure an explicit secure proxy.
+- Docker build contexts exclude `.env`, host `node_modules`, build output, and
+  logs. Runtime images contain only compiled application output and production
+  dependencies; local Compose defaults use a known development key and must not
+  be used as production secrets.
 
 ## Planned security boundaries
 

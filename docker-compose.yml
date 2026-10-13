@@ -24,6 +24,105 @@ services:
     networks:
       - hookforge_backend
 
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - hookforge_backend
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
+      MAX_EVENT_PAYLOAD_BYTES: ${MAX_EVENT_PAYLOAD_BYTES:-131072}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-false}
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - hookforge_backend
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-false}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-250}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+      WORKER_REQUEST_TIMEOUT_MS: ${WORKER_REQUEST_TIMEOUT_MS:-10000}
+      MAX_DELIVERY_ATTEMPTS: ${MAX_DELIVERY_ATTEMPTS:-8}
+      RETRY_INITIAL_DELAY_MS: ${RETRY_INITIAL_DELAY_MS:-1000}
+      RETRY_MAX_DELAY_MS: ${RETRY_MAX_DELAY_MS:-3600000}
+      RETRY_JITTER_RATIO: ${RETRY_JITTER_RATIO:-0.2}
+      MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-8192}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - hookforge_backend
+
+  web:
+    build:
+      context: .
+      target: web
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - hookforge_backend
+
   redis:
     image: redis:7-alpine
     command:
