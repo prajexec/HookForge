@@ -21,9 +21,12 @@ docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 
 ## Environment
 
-`DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `LOG_LEVEL`, and `CORS_ORIGIN` are
-validated by Zod at API startup. `.env` is ignored by Git. The example values
-are local-only and must not be reused in production.
+`DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `LOG_LEVEL`, `CORS_ORIGIN`,
+`SESSION_TTL_SECONDS`, `SECRET_ENCRYPTION_KEY`, and
+`ALLOW_PRIVATE_ENDPOINTS` are validated by Zod at API startup. `.env` is
+ignored by Git. The example encryption key and database password are local-only
+and must not be reused in production. Production refuses to start without an
+explicit encryption key.
 
 ## Checks
 
@@ -42,9 +45,9 @@ integration tests will be added with the domain schema.
 ## Migrations
 
 Migrations are ordered SQL files in `db/migrations/`. Run `npm run db:migrate`
-after the database is reachable. The runner creates `schema_migrations`, runs
-each unapplied file in a transaction, and records its version. Never edit an
-already-applied migration; add a new one.
+after the database is reachable. The runner creates `schema_migrations`, takes
+a PostgreSQL advisory lock, runs each unapplied file in a transaction, and
+records its version. Never edit an already-applied migration; add a new one.
 
 ## Git workflow
 

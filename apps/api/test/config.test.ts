@@ -17,4 +17,17 @@ describe("environment configuration", () => {
       "Invalid environment configuration",
     );
   });
+
+  it("requires a key and rejects private endpoints in production", () => {
+    expect(() => parseConfig({ NODE_ENV: "production" })).toThrow(
+      "SECRET_ENCRYPTION_KEY is required in production",
+    );
+    expect(() =>
+      parseConfig({
+        NODE_ENV: "production",
+        SECRET_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        ALLOW_PRIVATE_ENDPOINTS: "true",
+      }),
+    ).toThrow("ALLOW_PRIVATE_ENDPOINTS cannot be enabled in production");
+  });
 });

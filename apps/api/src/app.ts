@@ -7,6 +7,11 @@ import helmet from "@fastify/helmet";
 
 import type { AppConfig } from "./config.js";
 import type { AppDependencies } from "./dependencies.js";
+import { AppError } from "./errors.js";
+import { registerAuthRoutes } from "./routes/auth.js";
+import { registerEndpointRoutes } from "./routes/endpoints.js";
+import { registerProjectRoutes } from "./routes/projects.js";
+import type { EndpointUrlValidator } from "./security/url.js";
 import { Metrics } from "./metrics.js";
 
 export interface BuildAppOptions {
@@ -14,6 +19,7 @@ export interface BuildAppOptions {
   dependencies: AppDependencies;
   logger?: FastifyServerOptions["logger"];
   metrics?: Metrics;
+  endpointUrlValidator?: EndpointUrlValidator;
 }
 
 export async function buildApp({
@@ -21,10 +27,12 @@ export async function buildApp({
   dependencies,
   logger,
   metrics = new Metrics(),
+  endpointUrlValidator,
 }: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: logger ?? { level: config.LOG_LEVEL },
     requestIdHeader: "x-request-id",
+    bodyLimit: 256 * 1024,
   });
 
   await app.register(helmet);
@@ -64,6 +72,14 @@ export async function buildApp({
     return reply.send(metrics.snapshot());
   });
 
+  await registerAuthRoutes(app, { config, store: dependencies.store });
+  await registerProjectRoutes(app, { store: dependencies.store });
+  await registerEndpointRoutes(app, {
+    config,
+    store: dependencies.store,
+    ...(endpointUrlValidator ? { urlValidator: endpointUrlValidator } : {}),
+  });
+
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "Unhandled request error");
 
@@ -72,21 +88,29 @@ export async function buildApp({
     }
 
     const statusCode =
-      typeof error === "object" &&
-      error !== null &&
-      "statusCode" in error &&
-      typeof error.statusCode === "number"
+      error instanceof AppError
         ? error.statusCode
-        : 500;
+        : typeof error === "object" &&
+            error !== null &&
+            "statusCode" in error &&
+            typeof error.statusCode === "number"
+          ? error.statusCode
+          : 500;
     const errorCode =
-      typeof error === "object" &&
-      error !== null &&
-      "code" in error &&
-      typeof error.code === "string"
+      error instanceof AppError
         ? error.code
-        : "INTERNAL_SERVER_ERROR";
+        : typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            typeof error.code === "string"
+          ? error.code
+          : "INTERNAL_SERVER_ERROR";
     const errorMessage =
-      error instanceof Error ? error.message : "Internal server error";
+      error instanceof AppError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : "Internal server error";
 
     return reply.code(statusCode).send({
       error: {

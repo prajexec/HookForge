@@ -8,13 +8,22 @@
 - Health and metrics responses do not include credentials, URLs, payloads, or
   dependency error text.
 - `.env` and generated artifacts are ignored by Git.
+- Passwords use asynchronous Node.js `scrypt`; bearer session tokens are
+  persisted only as SHA-256 hashes and can be revoked.
+- Endpoint signing secrets use AES-256-GCM encryption at rest and are returned
+  only during creation or rotation.
+- Project and endpoint queries require an authenticated owner predicate; an
+  object belonging to another user is returned as `404`.
+- Endpoint URL registration and update reject non-HTTP(S) schemes, credentials,
+  fragments, blocked hostnames, and DNS resolutions into private address ranges.
 
 ## Planned security boundaries
 
-The domain milestones must implement password hashing or another documented
-authentication mechanism, project-level authorization on every resource query,
-parameterized SQL, rate limits, payload limits, constant-time HMAC comparison,
-secret rotation, and response redaction.
+The domain milestones still need login rate limiting, event payload limits,
+constant-time HMAC comparison for delivery, and full response redaction across
+future delivery diagnostics. Current SQL access is parameterized and endpoint
+secrets are encrypted, but the master encryption key must be supplied through a
+secret manager in production.
 
 Outbound delivery is an SSRF boundary. Endpoint registration and every delivery
 must validate URL schemes, resolve hostnames, reject loopback, private,

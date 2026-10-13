@@ -1,8 +1,8 @@
 # HookForge API
 
-The API is versioned under `/api/v1` for domain routes. The foundation
-milestone currently exposes only unversioned operational endpoints because they
-are consumed by orchestrators rather than project clients.
+The API is versioned under `/api/v1` for domain routes. Operational endpoints
+remain unversioned because they are consumed by orchestrators rather than
+project clients.
 
 ## Implemented routes
 
@@ -59,6 +59,76 @@ domain error envelope will remain:
 }
 ```
 
-Authentication, project routes, idempotency headers, pagination, rate limits,
-and OpenAPI generation will be documented when those routes are implemented.
-No unimplemented route is presented as available.
+Idempotency headers, cursor pagination, rate limits, and OpenAPI generation will
+be expanded as those features are implemented. No unimplemented route is
+presented as available.
+
+## Authentication
+
+Authentication uses PostgreSQL-backed opaque bearer sessions. Registration and
+login return a token once; send it on subsequent requests as:
+
+```text
+Authorization: Bearer <token>
+```
+
+Raw tokens are hashed before persistence. Sessions expire according to
+`SESSION_TTL_SECONDS` and can be revoked with logout. Passwords must be at
+least 12 characters and are stored with Node.js `scrypt` hashes. The current
+API does not use browser cookies, so mutation routes do not require a CSRF
+token.
+
+## Implemented authentication and project routes
+
+### `POST /api/v1/auth/register`
+
+Accepts `{ "email": "dev@example.com", "password": "..." }` and returns
+`201` with a user, bearer token, and expiration. Duplicate emails return `409`.
+
+### `POST /api/v1/auth/login`
+
+Accepts the same credentials and returns a new session. Invalid credentials
+return the same generic `401` response regardless of whether the email exists.
+
+### `GET /api/v1/auth/me` and `POST /api/v1/auth/logout`
+
+Both require a bearer token. `me` returns the current user; logout revokes the
+current session and returns `204`.
+
+### `POST /api/v1/projects`
+
+Creates a project from `{ "name": "Payments" }`. Ownership is derived from
+the authenticated session, never from request input.
+
+### `GET /api/v1/projects` and `GET /api/v1/projects/{projectId}`
+
+List and retrieve only projects owned by the authenticated user. The list
+supports `?limit=1..100` and defaults to 50. An inaccessible project is
+reported as `404`.
+
+## Implemented endpoint routes
+
+- `POST /api/v1/projects/{projectId}/endpoints` — create `{name,url}` and
+  return the signing secret once.
+- `GET /api/v1/projects/{projectId}/endpoints` — list owned endpoints with a
+  `limit` query parameter.
+- `GET /api/v1/projects/{projectId}/endpoints/{endpointId}` — retrieve an
+  endpoint without its secret.
+- `PATCH /api/v1/projects/{projectId}/endpoints/{endpointId}` — update name or
+  URL, with the same SSRF policy as creation.
+- `POST .../{endpointId}/pause` and `POST .../{endpointId}/resume` — change
+  delivery eligibility.
+- `POST .../{endpointId}/rotate-secret` — atomically create a new encrypted
+  secret version and return the new plaintext once.
+- `DELETE .../{endpointId}` — safely disables the endpoint and preserves its
+  record for future delivery history.
+
+Endpoint list/detail responses never include a signing secret. URL validation
+allows only HTTP(S), rejects credentials and fragments, blocks local/private,
+link-local, and metadata addresses by default, and resolves hostnames before
+accepting them. `ALLOW_PRIVATE_ENDPOINTS=true` is an explicit local-only
+escape hatch for a controlled test environment and must not be used in
+production.
+
+Pagination is currently bounded-limit only; cursor pagination will be added
+with delivery inspection once those tables exist.

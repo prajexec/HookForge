@@ -17,9 +17,31 @@ const environmentSchema = z.object({
     ),
   REDIS_URL: z.string().min(1).default("redis://localhost:6379"),
   CORS_ORIGIN: z.string().min(1).default("http://localhost:5173"),
+  SESSION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(2_592_000)
+    .default(86_400),
+  SECRET_ENCRYPTION_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]+={0,2}$/, "must be base64")
+    .refine((value) => Buffer.from(value, "base64").length === 32, {
+      message: "must decode to 32 bytes",
+    })
+    .optional(),
+  ALLOW_PRIVATE_ENDPOINTS: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
 });
 
-export type AppConfig = z.infer<typeof environmentSchema>;
+export type AppConfig = Omit<
+  z.infer<typeof environmentSchema>,
+  "SECRET_ENCRYPTION_KEY"
+> & { SECRET_ENCRYPTION_KEY: string };
+
+const localEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 export function parseConfig(
   environment: NodeJS.ProcessEnv = process.env,
@@ -32,5 +54,26 @@ export function parseConfig(
     );
   }
 
-  return result.data;
+  if (
+    result.data.NODE_ENV === "production" &&
+    !result.data.SECRET_ENCRYPTION_KEY
+  ) {
+    throw new Error(
+      "Invalid environment configuration: SECRET_ENCRYPTION_KEY is required in production",
+    );
+  }
+  if (
+    result.data.NODE_ENV === "production" &&
+    result.data.ALLOW_PRIVATE_ENDPOINTS
+  ) {
+    throw new Error(
+      "Invalid environment configuration: ALLOW_PRIVATE_ENDPOINTS cannot be enabled in production",
+    );
+  }
+
+  return {
+    ...result.data,
+    SECRET_ENCRYPTION_KEY:
+      result.data.SECRET_ENCRYPTION_KEY ?? localEncryptionKey,
+  };
 }

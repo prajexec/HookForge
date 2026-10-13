@@ -2,9 +2,10 @@ import { Pool } from "pg";
 import { createClient } from "redis";
 
 import type { AppConfig } from "./config.js";
+import { PgStore, type HookForgeStore } from "./store.js";
 
 export interface DatabaseHealthClient {
-  query: (text: string) => Promise<unknown>;
+  query: (text: string, values?: readonly unknown[]) => Promise<unknown>;
 }
 
 export interface RedisHealthClient {
@@ -14,6 +15,7 @@ export interface RedisHealthClient {
 export interface AppDependencies {
   db: DatabaseHealthClient;
   redis: RedisHealthClient;
+  store: HookForgeStore;
   connect: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -42,6 +44,7 @@ export function createDependencies(config: AppConfig): AppDependencies {
     redis: {
       ping: () => redis.ping(),
     },
+    store: new PgStore(pool),
     connect: async () => {
       if (!redis.isOpen) {
         await redis.connect();

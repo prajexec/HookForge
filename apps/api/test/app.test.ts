@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { parseConfig } from "../src/config.js";
 import type { AppDependencies } from "../src/dependencies.js";
+import { MemoryStore } from "./support/memory-store.js";
 
 const config = parseConfig({ NODE_ENV: "test" });
 const applications: Awaited<ReturnType<typeof buildApp>>[] = [];
@@ -13,6 +14,7 @@ function dependencies(
   return {
     db: { query: async () => undefined },
     redis: { ping: async () => "PONG" },
+    store: new MemoryStore(),
     connect: async () => undefined,
     close: async () => undefined,
     ...overrides,

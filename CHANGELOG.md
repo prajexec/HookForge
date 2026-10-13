@@ -10,3 +10,7 @@
 - Added ARM64-conscious PostgreSQL and Redis Compose services.
 - Added the transactional SQL migration runner and initial `pgcrypto` migration.
 - Added foundation architecture, security, operations, and development docs.
+- Added users, sessions, projects, endpoints, encrypted signing-secret versions,
+  and tenant-scoped APIs.
+- Added scrypt password hashing, opaque bearer authentication, SSRF-aware URL
+  validation, endpoint lifecycle actions, and 20 automated tests.

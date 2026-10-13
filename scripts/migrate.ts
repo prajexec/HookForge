@@ -15,9 +15,13 @@ const migrationsDirectory = join(
 
 const config = parseConfig();
 const pool = new Pool({ connectionString: config.DATABASE_URL });
+const client = await pool.connect();
 
 try {
-  await pool.query(`
+  await client.query(
+    "SELECT pg_advisory_lock(hashtextextended('hookforge:migrations', 0))",
+  );
+  await client.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version text PRIMARY KEY,
       applied_at timestamptz NOT NULL DEFAULT now()
@@ -30,7 +34,7 @@ try {
 
   for (const file of files) {
     const version = basename(file, ".sql");
-    const existing = await pool.query<{ version: string }>(
+    const existing = await client.query<{ version: string }>(
       "SELECT version FROM schema_migrations WHERE version = $1",
       [version],
     );
@@ -40,7 +44,6 @@ try {
     }
 
     const sql = await readFile(join(migrationsDirectory, file), "utf8");
-    const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
@@ -54,10 +57,12 @@ try {
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
-    } finally {
-      client.release();
     }
   }
 } finally {
+  await client.query(
+    "SELECT pg_advisory_unlock(hashtextextended('hookforge:migrations', 0))",
+  );
+  client.release();
   await pool.end();
 }

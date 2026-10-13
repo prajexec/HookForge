@@ -14,11 +14,17 @@ The repository currently contains the foundation milestone:
 - Zod environment validation, Pino-backed Fastify logging, security headers, and
   restricted local CORS defaults.
 - PostgreSQL 16 and Redis 7 Alpine Compose services tuned for local ARM64 use.
-- Transactional SQL migration runner with the initial `pgcrypto` migration.
-- Unit tests for health, readiness, metrics, and configuration behavior.
+- Transactional SQL migration runner with advisory-lock protection.
+- PostgreSQL domain schema for users, sessions, projects, endpoints, and
+  encrypted secret versions.
+- Bearer-token authentication and tenant-scoped project/endpoint APIs.
+- SSRF-aware endpoint URL validation and lifecycle actions.
+- Unit and route tests for health, authentication, tenant isolation, crypto,
+  endpoint lifecycle, and URL policy.
 
-The delivery domain, authentication, worker queue, dashboard data views, and
-OpenAPI document are deliberately introduced in later tested milestones.
+Event ingestion, durable delivery rows, the worker queue, signed HTTP delivery,
+retries, dashboard data views, and OpenAPI generation are deliberately
+introduced in later tested milestones.
 
 ## Architecture direction
 
@@ -71,6 +77,10 @@ docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 The web foundation can be started in a second terminal with
 `npm run dev:web` and is available at `http://localhost:5173`.
 
+The local `.env.example` encryption key is intentionally a known development
+value. Replace it before sharing a development environment or deploying
+anywhere. Production startup requires `SECRET_ENCRYPTION_KEY` to be supplied.
+
 ## Commands
 
 ```bash
@@ -89,6 +99,16 @@ stopped containers and images after inspection; never remove the named
 data. The explicit reset command will be documented when the complete Compose
 stack is available.
 
+The explicit reset command for local data is:
+
+```bash
+docker compose down
+docker volume rm hookforge_postgres_data
+```
+
+Run it only after confirming that local data can be discarded; it is never part
+of the normal setup or cleanup flow.
+
 ## Documentation
 
 - [API documentation](docs/api/API.md)
@@ -104,9 +124,8 @@ real API-backed dashboard milestone.
 
 ## Current limitations and roadmap
 
-The current milestone does not yet accept authenticated events or deliver HTTP
-requests. The next milestones add the domain schema and project/endpoint APIs,
-then idempotent event ingestion, the durable worker, signed delivery and
-retries, replay, and the API-backed dashboard. Benchmarks will be added only
-after delivery is functional and will report measured values with their test
-environment.
+The current milestone does not yet accept events or deliver HTTP requests.
+The next milestones add idempotent event ingestion, durable delivery rows, the
+worker, signed delivery and retries, replay, and the API-backed dashboard.
+Benchmarks will be added only after delivery is functional and will report
+measured values with their test environment.

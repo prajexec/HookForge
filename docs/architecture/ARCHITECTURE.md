@@ -6,10 +6,10 @@ HookForge starts as a modular monolith with independently started API and
 worker processes. Both processes share typed modules and SQL migrations, while
 PostgreSQL remains the authoritative store for all durable delivery state.
 
-The repository is currently at the foundation milestone. The data and delivery
-flows below describe the accepted target architecture for the next milestones;
-the current implementation exposes only service health, readiness, and runtime
-metrics.
+The repository currently implements service health, readiness, runtime metrics,
+authentication, project ownership, endpoint lifecycle management, and the
+initial domain schema. Event persistence and delivery flows below describe the
+accepted next milestones.
 
 ## Components
 
@@ -23,6 +23,16 @@ metrics.
   Redis must not lose an event or delivery.
 - **Web**: React dashboard that calls the versioned API; it contains no durable
   business state of its own.
+
+Authentication currently uses PostgreSQL-backed opaque bearer sessions. User
+passwords are scrypt hashes, session tokens are stored only as SHA-256 hashes,
+and every project/endpoint query scopes through the authenticated owner.
+
+Endpoint signing secrets are generated in Node.js and encrypted with
+AES-256-GCM before being stored in `endpoint_secrets`. The plaintext is returned
+only on endpoint creation or explicit rotation. A current secret version is
+kept separately from retired versions so future delivery can select a stable
+configuration.
 
 ## Queue and transaction boundary
 
