@@ -29,6 +29,20 @@ Run `npm run test:integration` after starting local PostgreSQL to verify the
 event transaction, idempotency behavior, active-endpoint fan-out, and rollback
 against the real schema.
 
+## Worker recovery
+
+Build the worker with `npm run build`, then start it with
+`npm run start:worker`. It polls pending deliveries, uses bounded concurrency,
+and exits gracefully on SIGTERM after in-flight requests finish or time out.
+Each claim has a lease. If the worker crashes, the next worker claim recovers
+expired leases and increments the attempt count. Inspect the `deliveries` and
+`delivery_attempts` tables directly until the delivery inspection API exists.
+
+Worker defaults are intentionally conservative for local development:
+concurrency 5, a 60-second lease, a 10-second request timeout, an 8 KiB
+response excerpt, and 8 maximum attempts. Adjust them through `.env` only after
+measuring the downstream and PostgreSQL workload.
+
 ## Logs and disk
 
 Use `docker compose logs --tail=100 postgres redis` for dependency diagnostics

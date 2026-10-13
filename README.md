@@ -19,6 +19,8 @@ The repository currently contains the foundation milestone:
   encrypted secret versions.
 - Bearer-token authentication and tenant-scoped project/endpoint APIs.
 - Idempotent event ingestion with atomic delivery fan-out for active endpoints.
+- PostgreSQL-backed worker with leases, bounded HTTP delivery, HMAC signatures,
+  retry scheduling, attempt history, and abandoned-lease recovery.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, and URL policy.
@@ -125,9 +127,10 @@ real API-backed dashboard milestone.
 
 ## Current limitations and roadmap
 
-The current milestone accepts and durably schedules events but does not yet
-deliver HTTP requests. The next milestones add the worker, signed delivery and
-retries, replay, and the API-backed dashboard.
+The current milestone accepts, schedules, and delivers events through the
+standalone worker process. The next milestones add delivery inspection and
+replay APIs, the API-backed dashboard, Dockerized application services, and
+OpenAPI generation.
 
 `npm test` runs fast in-memory unit and route tests. Once PostgreSQL and Redis
 are running, `npm run test:integration` applies migrations and runs the real

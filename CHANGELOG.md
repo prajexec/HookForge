@@ -16,3 +16,6 @@
   validation, endpoint lifecycle actions, and 20 automated tests.
 - Added event ingestion with canonical idempotency keys, payload limits, active
   endpoint fan-out, endpoint configuration snapshots, and durable delivery rows.
+- Added the delivery worker with PostgreSQL leases, HMAC-SHA256 signatures,
+  bounded HTTP requests, retry classification/backoff, response excerpts, and
+  abandoned-lease recovery.

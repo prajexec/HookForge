@@ -1,6 +1,6 @@
 # ADR 0004: Capped backoff with jitter
 
-- **Status:** Accepted policy; implementation pending
+- **Status:** Accepted
 - **Date:** 2026-10-13
 
 ## Context
@@ -18,5 +18,6 @@ Most other `4xx` responses are terminal. Every attempt is recorded.
 ## Consequences
 
 Retry scheduling is durable in PostgreSQL and does not require a sleeping
-worker per delayed delivery. The exact defaults will be committed with the
-worker implementation and covered by deterministic unit tests.
+worker per delayed delivery. The current defaults are a 1-second initial delay,
+1-hour cap, 20% bounded jitter, and 8 maximum attempts. `Retry-After` is
+honored within the configured cap.

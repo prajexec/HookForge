@@ -41,7 +41,7 @@ sequenceDiagram
   participant W as Worker
   participant P as PostgreSQL
   participant R as Receiver
-  Note over W,R: Future delivery milestone
+  Note over W,R: Worker delivery path
   W->>P: Claim row with SKIP LOCKED and lease
   W->>R: POST raw body with signature
   alt Success

@@ -1,6 +1,6 @@
 # ADR 0005: Versioned HMAC signature header
 
-- **Status:** Accepted policy; implementation pending
+- **Status:** Accepted
 - **Date:** 2026-10-13
 
 ## Context
@@ -18,6 +18,7 @@ and previous verification secrets during an explicit overlap window.
 
 ## Consequences
 
-The raw body must never be parsed and reserialized before signing. The format
-is independently implementable, versioned, and resistant to simple replay when
-receivers enforce the timestamp tolerance.
+The worker signs the exact compact JSON body it sends and never signs a parsed
+and separately serialized representation. The format is independently
+implementable, versioned, and resistant to simple replay when receivers enforce
+the timestamp tolerance.

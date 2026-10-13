@@ -23,7 +23,9 @@ docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d
 
 `DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `LOG_LEVEL`, `CORS_ORIGIN`,
 `SESSION_TTL_SECONDS`, `MAX_EVENT_PAYLOAD_BYTES`, `SECRET_ENCRYPTION_KEY`, and
-`ALLOW_PRIVATE_ENDPOINTS` are validated by Zod at API startup. `.env` is
+`ALLOW_PRIVATE_ENDPOINTS` are validated by Zod at API startup. Worker-specific
+concurrency, lease, timeout, retry, and response-size settings are validated by
+the worker process. `.env` is
 ignored by Git. The example encryption key and database password are local-only
 and must not be reused in production. Production refuses to start without an
 explicit encryption key.
@@ -39,10 +41,11 @@ npm run test:integration
 npm run build
 ```
 
-Run `npm run dev:api` and `npm run dev:web` in separate terminals. API tests
-use in-memory dependency doubles and do not require internet access. The
-integration command requires the local PostgreSQL service and applies all
-migrations before testing the real `PgStore` event transaction.
+Run `npm run dev:api`, `npm run start:worker` (after building), and
+`npm run dev:web` in separate terminals. Unit and route tests use in-memory
+dependency doubles and do not require internet access. The integration command
+requires the local PostgreSQL service and applies all migrations before testing
+the real event and worker transactions.
 
 ## Migrations
 

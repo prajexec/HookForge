@@ -165,3 +165,7 @@ The transaction locks the owned project row, inserts the event, records the
 idempotency key when present, snapshots active endpoint URLs and secret versions,
 and inserts delivery rows before committing. A committed accepted event
 therefore cannot be acknowledged without its durable initial delivery work.
+
+The standalone worker claims those pending rows asynchronously. The current
+milestone does not yet expose delivery inspection or replay routes; those will
+be added after the attempt-history API is implemented.

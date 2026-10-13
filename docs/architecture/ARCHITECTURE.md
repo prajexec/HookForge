@@ -8,8 +8,8 @@ PostgreSQL remains the authoritative store for all durable delivery state.
 
 The repository currently implements service health, readiness, runtime metrics,
 authentication, project ownership, endpoint lifecycle management, event
-persistence, idempotency, and initial durable delivery scheduling. The worker
-delivery portion remains a later milestone.
+persistence, idempotency, durable delivery scheduling, and the initial worker
+delivery path. Delivery inspection and replay APIs remain later milestones.
 
 ## Components
 
@@ -40,10 +40,10 @@ The delivery queue is a PostgreSQL-backed table. Event ingestion locks the owned
 project row, then inserts the event, its idempotency record, and one delivery
 row per active endpoint in a single transaction. Each delivery snapshots the
 endpoint URL and secret version so later endpoint edits do not alter already
-accepted work. A future worker will claim a due row using a short transaction
-and `FOR UPDATE SKIP LOCKED`, set a lease, and commit before making the outbound
-request. A second transaction will record the attempt and either mark the
-delivery terminal or assign its next due time.
+accepted work. The worker claims a due row using a short transaction and
+`FOR UPDATE SKIP LOCKED`, sets a lease, and commits before making the outbound
+request. A second transaction records the attempt and either marks the
+delivery terminal or assigns its next due time.
 
 This removes the database/queue dual-write problem: a committed event always
 has durable delivery rows. It also avoids requiring a second durable queue
@@ -72,9 +72,17 @@ leases to the due state. Network failures, timeouts, `408`, `429`, and selected
 terminal. Retry timing uses capped exponential backoff with bounded jitter and
 an upper-bounded `Retry-After` value.
 
+The worker increments the durable attempt count when claiming a row. A process
+crash after claiming leaves the row leased until expiration; the next claim
+returns it to `pending` and can deliver it again. Every completed HTTP attempt
+is stored in `delivery_attempts`, including response status, bounded excerpt,
+duration, classification, and outcome.
+
 Outbound requests use a deadline, disable redirects by default, bound response
 body reads, and validate the endpoint again at delivery time to reduce SSRF
-risk. No signing secret, authorization header, or payload is logged by default.
+risk. Requests sign `timestamp + "." + raw_body` with HMAC-SHA256 and include
+the stable event ID and timestamp headers. No signing secret, authorization
+header, or payload is logged by default.
 
 ## Scaling considerations
 

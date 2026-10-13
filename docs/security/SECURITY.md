@@ -19,6 +19,10 @@
 - Event bodies are bounded by Fastify's request limit and the configured
   `MAX_EVENT_PAYLOAD_BYTES` limit; idempotency fingerprints prevent accidental
   duplicate fan-out when clients retry an accepted request.
+- The worker revalidates endpoint DNS and blocked address ranges before every
+  attempt, disables redirects, applies request deadlines, and bounds response
+  body reads. HMAC signatures use constant-time verification in the helper and
+  include a timestamp tolerance for receiver-side replay protection.
 
 ## Planned security boundaries
 
