@@ -17,6 +17,37 @@ const environmentSchema = z.object({
     ),
   REDIS_URL: z.string().min(1).default("redis://localhost:6379"),
   CORS_ORIGIN: z.string().min(1).default("http://localhost:5173"),
+  RATE_LIMIT_ENABLED: z.enum(["true", "false"]).optional(),
+  RATE_LIMIT_MAX_ENTRIES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .default(10_000),
+  RATE_LIMIT_AUTH_MAX_REQUESTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000_000)
+    .default(10),
+  RATE_LIMIT_AUTH_WINDOW_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(60),
+  RATE_LIMIT_EVENT_MAX_REQUESTS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000_000)
+    .default(120),
+  RATE_LIMIT_EVENT_WINDOW_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(60),
   SESSION_TTL_SECONDS: z.coerce
     .number()
     .int()
@@ -44,8 +75,8 @@ const environmentSchema = z.object({
 
 export type AppConfig = Omit<
   z.infer<typeof environmentSchema>,
-  "SECRET_ENCRYPTION_KEY"
-> & { SECRET_ENCRYPTION_KEY: string };
+  "SECRET_ENCRYPTION_KEY" | "RATE_LIMIT_ENABLED"
+> & { SECRET_ENCRYPTION_KEY: string; RATE_LIMIT_ENABLED: boolean };
 
 const localEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -79,6 +110,10 @@ export function parseConfig(
 
   return {
     ...result.data,
+    RATE_LIMIT_ENABLED:
+      result.data.RATE_LIMIT_ENABLED === undefined
+        ? result.data.NODE_ENV !== "test"
+        : result.data.RATE_LIMIT_ENABLED === "true",
     SECRET_ENCRYPTION_KEY:
       result.data.SECRET_ENCRYPTION_KEY ?? localEncryptionKey,
   };

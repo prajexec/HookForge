@@ -84,6 +84,12 @@ the per-event/endpoint replay number, and snapshots the endpoint's current
 configuration. This keeps original attempts auditable and prevents replay from
 mutating historical results.
 
+The API exposes safe operational metrics from in-process request counters and
+PostgreSQL aggregates. A worker writes a PostgreSQL heartbeat every few seconds;
+the worker container health check verifies a fresh active heartbeat. Heartbeat
+state is operational liveness, not delivery truth: delivery leases and attempt
+rows remain authoritative if a worker disappears.
+
 Outbound requests use a deadline, disable redirects by default, bound response
 body reads, and validate the endpoint again at delivery time to reduce SSRF
 risk. Requests sign `timestamp + "." + raw_body` with HMAC-SHA256 and include

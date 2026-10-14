@@ -10,6 +10,7 @@ import {
   verifyPassword,
 } from "../security/crypto.js";
 import type { HookForgeStore, UserRecord } from "../store.js";
+import { enforceRateLimit, type RateLimiter } from "../rate-limit.js";
 
 const credentialsSchema = z.object({
   email: z.string().trim().email().max(320),
@@ -26,6 +27,7 @@ export interface AuthenticatedRequest extends FastifyRequest {
 interface RouteOptions {
   config: AppConfig;
   store: HookForgeStore;
+  rateLimiter?: RateLimiter;
 }
 
 function validationError(error: z.ZodError): never {
@@ -98,9 +100,10 @@ async function issueSession(
 
 export async function registerAuthRoutes(
   app: FastifyInstance,
-  { config, store }: RouteOptions,
+  { config, store, rateLimiter }: RouteOptions,
 ): Promise<void> {
   app.post("/api/v1/auth/register", async (request, reply) => {
+    enforceAuthRateLimit(rateLimiter, config, request.ip);
     const credentials = parseCredentials(request.body);
     const email = normalizeEmail(credentials.email);
     const user = await store.createUser({
@@ -118,6 +121,7 @@ export async function registerAuthRoutes(
   });
 
   app.post("/api/v1/auth/login", async (request, reply) => {
+    enforceAuthRateLimit(rateLimiter, config, request.ip);
     const credentials = parseCredentials(request.body);
     const user = await store.findUserByEmail(normalizeEmail(credentials.email));
     if (
@@ -144,5 +148,17 @@ export async function registerAuthRoutes(
     const auth = await authenticate(request, store);
     await store.revokeSession(auth.sessionId);
     return reply.code(204).send();
+  });
+}
+
+function enforceAuthRateLimit(
+  rateLimiter: RateLimiter | undefined,
+  config: AppConfig,
+  ip: string,
+): void {
+  if (!rateLimiter) return;
+  enforceRateLimit(rateLimiter, `auth:${ip || "unknown"}`, {
+    maxRequests: config.RATE_LIMIT_AUTH_MAX_REQUESTS,
+    windowSeconds: config.RATE_LIMIT_AUTH_WINDOW_SECONDS,
   });
 }

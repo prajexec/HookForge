@@ -95,6 +95,48 @@ describe("API foundation", () => {
     expect(response.json()).toMatchObject({
       counters: { httpRequestsTotal: 2 },
     });
+    expect(response.json()).toMatchObject({
+      responseStatusCodes: { "200": 1 },
+      requestDurationMilliseconds: { count: 1 },
+      operational: {
+        queueBacklog: { pending: 0, inFlight: 0 },
+        workers: { active: 0, configuredConcurrency: 0 },
+      },
+    });
     expect(response.json()).not.toHaveProperty("databaseUrl");
+
+    const completedMetrics = await app.inject({
+      method: "GET",
+      url: "/metrics",
+    });
+    expect(completedMetrics.json()).toMatchObject({
+      responseStatusCodes: { "200": 2 },
+      requestDurationMilliseconds: { count: 2 },
+    });
+  });
+
+  it("serves the deterministic OpenAPI contract", async () => {
+    const app = await buildApp({
+      config,
+      dependencies: dependencies(),
+      logger: false,
+    });
+    applications.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/openapi.json",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.json()).toMatchObject({
+      openapi: "3.1.0",
+      paths: {
+        "/api/v1/projects/{projectId}/events": {
+          post: { operationId: "ingestEvent" },
+        },
+      },
+    });
   });
 });

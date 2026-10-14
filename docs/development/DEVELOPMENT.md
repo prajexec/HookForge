@@ -30,7 +30,7 @@ npm run dev:web
 ## Environment
 
 `DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `API_PORT`, `WEB_PORT`, `LOG_LEVEL`, `CORS_ORIGIN`,
-`SESSION_TTL_SECONDS`, `MAX_EVENT_PAYLOAD_BYTES`, `SECRET_ENCRYPTION_KEY`, and
+`RATE_LIMIT_*`, `SESSION_TTL_SECONDS`, `MAX_EVENT_PAYLOAD_BYTES`, `SECRET_ENCRYPTION_KEY`, and
 `ALLOW_PRIVATE_ENDPOINTS` are validated by Zod at API startup. Worker-specific
 concurrency, lease, timeout, retry, and response-size settings are validated by
 the worker process. `.env` is
@@ -68,6 +68,12 @@ The Compose `migrate` service runs this same runner and exits successfully
 before `api` and `worker` are allowed to start. Its advisory lock also makes
 manual reruns safe. The Compose image has separate `api`, `worker`, `migrate`,
 and `web` targets in the root `Dockerfile`.
+
+Run `npm run verify:deployment` to validate the Compose service graph, build
+targets, health checks, and migration dependencies without requiring a running
+Docker daemon. Run `npm run compose:build` and a `docker buildx build
+--platform linux/arm64 ...` command when Docker Desktop is running to validate
+actual image construction.
 
 ## Git workflow
 

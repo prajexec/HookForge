@@ -36,12 +36,25 @@ are available and `503` otherwise.
 The error state uses `"status": "not_ready"` and reports only `"ok"` or
 `"error"` per dependency.
 
+### `GET /openapi.json`
+
+Returns the versioned OpenAPI 3.1 contract for every implemented route. The
+checked-in artifact is [openapi.json](./openapi.json), and CI fails if it does
+not match the source contract. Regenerate it after an API route or response
+change with:
+
+```bash
+npm run openapi:generate
+```
+
 ### `GET /metrics`
 
 Returns a small JSON snapshot containing HTTP request counters, process memory
-and uptime, and event-loop lag. It contains no endpoint URLs, payloads, or
-credentials. A Prometheus exposition endpoint can be added if measured needs
-justify it.
+and uptime, event-loop lag, request duration aggregates, response status counts,
+sanitized error-code counts, queue backlog/status counts, delivery latency
+aggregates, and worker heartbeat/concurrency state. It contains no endpoint
+URLs, payloads, or credentials. A Prometheus exposition endpoint can be added
+if measured needs justify it.
 
 ## Request IDs and errors
 
@@ -59,8 +72,10 @@ domain error envelope will remain:
 }
 ```
 
-Rate limits and OpenAPI generation will be expanded as those features are
-implemented. No unimplemented route is presented as available.
+The complete machine-readable contract is available at `/openapi.json`. It
+documents bearer authentication, request and response schemas, pagination,
+idempotency behavior, rate-limit responses, and the safe error envelope. No
+unimplemented route is presented as available.
 
 ## Authentication
 
@@ -83,6 +98,9 @@ token.
 
 Accepts `{ "email": "dev@example.com", "password": "..." }` and returns
 `201` with a user, bearer token, and expiration. Duplicate emails return `409`.
+Sensitive auth routes use a bounded per-client fixed-window limiter by default:
+10 requests per 60 seconds. A rejected request returns `429`,
+`RATE_LIMIT_EXCEEDED`, and `Retry-After`.
 
 ### `POST /api/v1/auth/login`
 
@@ -165,6 +183,11 @@ The transaction locks the owned project row, inserts the event, records the
 idempotency key when present, snapshots active endpoint URLs and secret versions,
 and inserts delivery rows before committing. A committed accepted event
 therefore cannot be acknowledged without its durable initial delivery work.
+
+Event ingestion uses a bounded per-user/project fixed-window limiter by default:
+120 requests per 60 seconds. Unauthenticated attempts are keyed by client IP
+until authentication succeeds. The limiter is process-local and does not claim
+cross-instance coordination; scale-out deployments need shared coordination.
 
 The standalone worker claims those pending rows asynchronously. Delivery
 inspection and replay routes are described below.

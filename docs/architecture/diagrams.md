@@ -119,3 +119,15 @@ flowchart TB
   Web --> API
   Worker --> Internet[Configured webhook endpoints]
 ```
+
+## Operational observability flow
+
+```mermaid
+flowchart LR
+  API[API request hooks] --> Runtime[Safe runtime metrics]
+  API --> PG[(PostgreSQL aggregates)]
+  Worker[Worker heartbeat] --> PG
+  PG --> Metrics[GET /metrics]
+  Worker --> Health[Compose worker health check]
+  Health --> Restart[Compose restart on stale heartbeat]
+```

@@ -18,6 +18,12 @@ The API container exposes port 3000 to loopback, and the Nginx web container
 exposes port 80 as host port 5173. Nginx proxies same-origin `/api/` requests
 to `api:3000`; the browser never needs to know the internal Compose hostname.
 
+The worker health check queries its fresh PostgreSQL heartbeat. A worker that
+stops heartbeating becomes unhealthy after 30 seconds and is restarted by
+Compose, while any in-flight delivery is recovered by lease expiry. Inspect
+`GET /metrics` for active worker count, configured concurrency, active jobs,
+queue backlog, and delivery latency summaries.
+
 ## Graceful shutdown
 
 Send SIGTERM to the API or worker process. The API stops accepting new work,
@@ -44,11 +50,12 @@ Build the worker with `npm run build`, then start it with
 and exits gracefully on SIGTERM after in-flight requests finish or time out.
 Each claim has a lease. If the worker crashes, the next worker claim recovers
 expired leases and increments the attempt count. Inspect the `deliveries` and
-`delivery_attempts` tables directly until the delivery inspection API exists.
+`delivery_attempts` tables directly or use the delivery inspection API.
 
 Worker defaults are intentionally conservative for local development:
-concurrency 5, a 60-second lease, a 10-second request timeout, an 8 KiB
-response excerpt, and 8 maximum attempts. Adjust them through `.env` only after
+concurrency 5, a 60-second lease, a 5-second heartbeat, a 10-second request
+timeout, an 8 KiB response excerpt, and 8 maximum attempts. Adjust them through
+`.env` only after
 measuring the downstream and PostgreSQL workload.
 
 ## Logs and disk
@@ -64,3 +71,10 @@ expired leases for one project explicitly, call the reconcile route; normal
 worker claims recover them automatically. Replay only terminal failures and
 confirm the endpoint is active before replaying. Backups and broader incident
 procedures should include both `deliveries` and `delivery_attempts`.
+
+## Rate limits
+
+Default local limits are 10 authentication attempts per IP per 60 seconds and
+120 event-ingestion requests per user/project per 60 seconds. Tune the explicit
+`RATE_LIMIT_*` variables for a controlled benchmark; do not mistake a `429`
+response for downstream delivery latency.

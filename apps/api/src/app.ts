@@ -15,12 +15,15 @@ import { registerDeliveryRoutes } from "./routes/deliveries.js";
 import { registerProjectRoutes } from "./routes/projects.js";
 import type { EndpointUrlValidator } from "./security/url.js";
 import { Metrics } from "./metrics.js";
+import { InMemoryRateLimiter, type RateLimiter } from "./rate-limit.js";
+import { openApiDocument } from "./openapi.js";
 
 export interface BuildAppOptions {
   config: AppConfig;
   dependencies: AppDependencies;
   logger?: FastifyServerOptions["logger"];
   metrics?: Metrics;
+  rateLimiter?: RateLimiter;
   endpointUrlValidator?: EndpointUrlValidator;
 }
 
@@ -29,6 +32,9 @@ export async function buildApp({
   dependencies,
   logger,
   metrics = new Metrics(),
+  rateLimiter = config.RATE_LIMIT_ENABLED
+    ? new InMemoryRateLimiter({ maxEntries: config.RATE_LIMIT_MAX_ENTRIES })
+    : undefined,
   endpointUrlValidator,
 }: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
@@ -42,8 +48,22 @@ export async function buildApp({
     origin: config.CORS_ORIGIN === "*" ? true : config.CORS_ORIGIN,
   });
 
-  app.addHook("onRequest", async () => {
+  const requestStartedAt = new WeakMap<object, number>();
+
+  app.addHook("onRequest", async (request) => {
     metrics.increment("httpRequestsTotal");
+    requestStartedAt.set(request, performance.now());
+  });
+
+  app.addHook("onError", async (_request, _reply, error) => {
+    metrics.recordError(errorCode(error));
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    metrics.recordResponse(
+      reply.statusCode,
+      performance.now() - (requestStartedAt.get(request) ?? performance.now()),
+    );
   });
 
   app.get("/health", async (_request, reply) => {
@@ -71,10 +91,22 @@ export async function buildApp({
   });
 
   app.get("/metrics", async (_request, reply) => {
-    return reply.send(metrics.snapshot());
+    const [runtime, operational] = await Promise.all([
+      Promise.resolve(metrics.snapshot()),
+      dependencies.store.getOperationalMetrics(),
+    ]);
+    return reply.send({ ...runtime, operational });
   });
 
-  await registerAuthRoutes(app, { config, store: dependencies.store });
+  app.get("/openapi.json", async (_request, reply) => {
+    return reply.type("application/json").send(openApiDocument);
+  });
+
+  await registerAuthRoutes(app, {
+    config,
+    store: dependencies.store,
+    ...(rateLimiter ? { rateLimiter } : {}),
+  });
   await registerProjectRoutes(app, { store: dependencies.store });
   await registerEndpointRoutes(app, {
     config,
@@ -85,6 +117,7 @@ export async function buildApp({
     config,
     store: dependencies.store,
     metrics,
+    ...(rateLimiter ? { rateLimiter } : {}),
   });
   await registerDeliveryRoutes(app, {
     store: dependencies.store,
@@ -123,6 +156,14 @@ export async function buildApp({
           ? error.message
           : "Internal server error";
 
+    if (
+      statusCode === 429 &&
+      error instanceof AppError &&
+      error.retryAfterSeconds !== undefined
+    ) {
+      reply.header("retry-after", String(error.retryAfterSeconds));
+    }
+
     return reply.code(statusCode).send({
       error: {
         code: errorCode,
@@ -137,4 +178,19 @@ export async function buildApp({
   });
 
   return app;
+}
+
+function errorCode(error: unknown): string {
+  if (error instanceof AppError) {
+    return error.code;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return "INTERNAL_SERVER_ERROR";
 }

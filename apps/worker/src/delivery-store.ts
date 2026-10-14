@@ -47,6 +47,12 @@ export class LeaseLostError extends Error {
 export interface DeliveryStore {
   claimDueDelivery(leaseSeconds: number): Promise<DeliveryJob | null>;
   recordAttempt(input: DeliveryAttemptInput): Promise<void>;
+  heartbeat(input: {
+    workerId: string;
+    concurrency: number;
+    activeJobs: number;
+  }): Promise<void>;
+  stopHeartbeat(workerId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -226,6 +232,33 @@ export class PgDeliveryStore implements DeliveryStore {
     } finally {
       client.release();
     }
+  }
+
+  public async heartbeat(input: {
+    workerId: string;
+    concurrency: number;
+    activeJobs: number;
+  }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO worker_heartbeats
+         (worker_id, started_at, heartbeat_at, active, concurrency, active_jobs)
+       VALUES ($1, now(), now(), true, $2, $3)
+       ON CONFLICT (worker_id) DO UPDATE SET
+         heartbeat_at = now(),
+         active = true,
+         concurrency = EXCLUDED.concurrency,
+         active_jobs = EXCLUDED.active_jobs`,
+      [input.workerId, input.concurrency, input.activeJobs],
+    );
+  }
+
+  public async stopHeartbeat(workerId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE worker_heartbeats
+       SET active = false, heartbeat_at = now(), active_jobs = 0
+       WHERE worker_id = $1`,
+      [workerId],
+    );
   }
 
   public async close(): Promise<void> {

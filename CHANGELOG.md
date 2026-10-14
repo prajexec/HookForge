@@ -26,3 +26,9 @@
   detail, and replay actions.
 - Added ARM64-conscious multi-stage Docker targets, Nginx API proxying, Compose
   migration ordering, application health checks, and local service commands.
+- Added bounded API rate limits, request/response metrics, PostgreSQL worker
+  heartbeats, safe operational aggregates, and a configurable k6 benchmark
+  harness.
+- Added a deterministic OpenAPI 3.1 contract for all implemented routes,
+  served at `/openapi.json`, checked in under `docs/api/openapi.json`, and
+  verified for freshness in CI.

@@ -91,6 +91,29 @@ export interface ProjectOverview {
   };
 }
 
+export interface OperationalMetrics {
+  queueBacklog: {
+    pending: number;
+    inFlight: number;
+  };
+  deliveryStatusCounts: {
+    pending: number;
+    inFlight: number;
+    delivered: number;
+    failed: number;
+  };
+  deliveryLatencyMilliseconds: {
+    count: number;
+    average: number;
+  };
+  workers: {
+    active: number;
+    configuredConcurrency: number;
+    activeJobs: number;
+    stale: number;
+  };
+}
+
 export interface IngestEventResult {
   event: EventRecord;
   deliveryCount: number;
@@ -189,6 +212,7 @@ export interface HookForgeStore {
     ownerId: string,
     projectId: string,
   ): Promise<ProjectOverview | null>;
+  getOperationalMetrics(): Promise<OperationalMetrics>;
   createEndpoint(input: {
     ownerId: string;
     projectId: string;
@@ -610,6 +634,55 @@ export class PgStore implements HookForgeStore {
         in_flight: Number(row.deliveries_in_flight),
         delivered: Number(row.deliveries_delivered),
         failed: Number(row.deliveries_failed),
+      },
+    };
+  }
+
+  public async getOperationalMetrics(): Promise<OperationalMetrics> {
+    const result = await this.pool.query<DatabaseRow>(
+      `SELECT
+         (SELECT COUNT(*) FILTER (WHERE status = 'pending') FROM deliveries) AS pending,
+         (SELECT COUNT(*) FILTER (WHERE status = 'in_flight') FROM deliveries) AS in_flight,
+         (SELECT COUNT(*) FILTER (WHERE status = 'delivered') FROM deliveries) AS delivered,
+         (SELECT COUNT(*) FILTER (WHERE status = 'failed') FROM deliveries) AS failed,
+         (SELECT COUNT(*) FROM delivery_attempts
+          WHERE response_duration_ms IS NOT NULL) AS latency_count,
+         (SELECT COALESCE(AVG(response_duration_ms), 0) FROM delivery_attempts
+          WHERE response_duration_ms IS NOT NULL) AS latency_average,
+         (SELECT COUNT(*) FROM worker_heartbeats
+          WHERE active = true
+            AND heartbeat_at > now() - interval '30 seconds') AS active_workers,
+         (SELECT COALESCE(SUM(concurrency), 0) FROM worker_heartbeats
+          WHERE active = true
+            AND heartbeat_at > now() - interval '30 seconds') AS worker_concurrency,
+         (SELECT COALESCE(SUM(active_jobs), 0) FROM worker_heartbeats
+          WHERE active = true
+            AND heartbeat_at > now() - interval '30 seconds') AS active_jobs,
+         (SELECT COUNT(*) FROM worker_heartbeats
+          WHERE active = true
+            AND heartbeat_at <= now() - interval '30 seconds') AS stale_workers`,
+    );
+    const row = result.rows[0]!;
+    return {
+      queueBacklog: {
+        pending: Number(row.pending),
+        inFlight: Number(row.in_flight),
+      },
+      deliveryStatusCounts: {
+        pending: Number(row.pending),
+        inFlight: Number(row.in_flight),
+        delivered: Number(row.delivered),
+        failed: Number(row.failed),
+      },
+      deliveryLatencyMilliseconds: {
+        count: Number(row.latency_count),
+        average: Number(row.latency_average),
+      },
+      workers: {
+        active: Number(row.active_workers),
+        configuredConcurrency: Number(row.worker_concurrency),
+        activeJobs: Number(row.active_jobs),
+        stale: Number(row.stale_workers),
       },
     };
   }

@@ -30,6 +30,10 @@
   relative same-origin API path, omits credentials/cookies, and never stores or
   logs signing secrets. A production deployment should serve the web app and
   API behind the same trusted origin or configure an explicit secure proxy.
+- Sensitive authentication and event-ingestion routes use bounded fixed-window
+  rate limits. The limiter is intentionally process-local for the single API
+  deployment; it is not a substitute for a shared distributed limiter when
+  scaling out.
 - Docker build contexts exclude `.env`, host `node_modules`, build output, and
   logs. Runtime images contain only compiled application output and production
   dependencies; local Compose defaults use a known development key and must not

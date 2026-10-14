@@ -11,6 +11,12 @@ import { deliveryJob, encryptionKey } from "./fixtures.js";
 
 class FakeDeliveryStore implements DeliveryStore {
   public attempts: DeliveryAttemptInput[] = [];
+  public heartbeats: Array<{
+    workerId: string;
+    concurrency: number;
+    activeJobs: number;
+  }> = [];
+  public stoppedWorkerId: string | null = null;
   private claimed = false;
 
   public constructor(private readonly job: DeliveryJob) {}
@@ -23,6 +29,18 @@ class FakeDeliveryStore implements DeliveryStore {
 
   public async recordAttempt(input: DeliveryAttemptInput): Promise<void> {
     this.attempts.push(input);
+  }
+
+  public async heartbeat(input: {
+    workerId: string;
+    concurrency: number;
+    activeJobs: number;
+  }): Promise<void> {
+    this.heartbeats.push(input);
+  }
+
+  public async stopHeartbeat(workerId: string): Promise<void> {
+    this.stoppedWorkerId = workerId;
   }
 
   public async close(): Promise<void> {}
@@ -43,6 +61,8 @@ function config(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     RETRY_MAX_DELAY_MS: 10_000,
     RETRY_JITTER_RATIO: 0,
     MAX_RESPONSE_BYTES: 100,
+    WORKER_ID: "worker-test",
+    WORKER_HEARTBEAT_INTERVAL_MS: 5_000,
     ...overrides,
   };
 }
@@ -81,5 +101,23 @@ describe("delivery worker", () => {
       errorClassification: "max_attempts_exhausted",
     });
     expect(store.attempts[0]?.nextAttemptAt).toBeNull();
+  });
+
+  it("publishes a heartbeat while running and marks itself inactive on stop", async () => {
+    const store = new FakeDeliveryStore(deliveryJob());
+    const worker = new DeliveryWorker({
+      store,
+      config: config(),
+      fetchImpl: async () => new Response("ok", { status: 200 }),
+      sleep: async () => worker.stop(),
+    });
+
+    await worker.start();
+
+    expect(store.heartbeats[0]).toMatchObject({
+      workerId: "worker-test",
+      concurrency: 1,
+    });
+    expect(store.stoppedWorkerId).toBe("worker-test");
   });
 });

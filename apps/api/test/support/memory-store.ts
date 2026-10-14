@@ -13,6 +13,7 @@ import type {
   DeliveryListFilter,
   DeliveryListResult,
   DeliverySummary,
+  OperationalMetrics,
   EventRecord,
   HookForgeStore,
   IngestEventResult,
@@ -536,6 +537,31 @@ export class MemoryStore implements HookForgeStore {
       deliveries,
       nextCursor:
         hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+    };
+  }
+
+  public async getOperationalMetrics(): Promise<OperationalMetrics> {
+    const deliveryStatusCounts = {
+      pending: this.deliveries.filter(
+        (delivery) => delivery.status === "pending",
+      ).length,
+      inFlight: this.deliveries.filter(
+        (delivery) => delivery.status === "in_flight",
+      ).length,
+      delivered: this.deliveries.filter(
+        (delivery) => delivery.status === "delivered",
+      ).length,
+      failed: this.deliveries.filter((delivery) => delivery.status === "failed")
+        .length,
+    };
+    return {
+      queueBacklog: {
+        pending: deliveryStatusCounts.pending,
+        inFlight: deliveryStatusCounts.inFlight,
+      },
+      deliveryStatusCounts,
+      deliveryLatencyMilliseconds: { count: 0, average: 0 },
+      workers: { active: 0, configuredConcurrency: 0, activeJobs: 0, stale: 0 },
     };
   }
 

@@ -51,6 +51,12 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
       REDIS_URL: redis://redis:6379
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      RATE_LIMIT_MAX_ENTRIES: ${RATE_LIMIT_MAX_ENTRIES:-10000}
+      RATE_LIMIT_AUTH_MAX_REQUESTS: ${RATE_LIMIT_AUTH_MAX_REQUESTS:-10}
+      RATE_LIMIT_AUTH_WINDOW_SECONDS: ${RATE_LIMIT_AUTH_WINDOW_SECONDS:-60}
+      RATE_LIMIT_EVENT_MAX_REQUESTS: ${RATE_LIMIT_EVENT_MAX_REQUESTS:-120}
+      RATE_LIMIT_EVENT_WINDOW_SECONDS: ${RATE_LIMIT_EVENT_WINDOW_SECONDS:-60}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       MAX_EVENT_PAYLOAD_BYTES: ${MAX_EVENT_PAYLOAD_BYTES:-131072}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
@@ -96,11 +102,25 @@ services:
       RETRY_MAX_DELAY_MS: ${RETRY_MAX_DELAY_MS:-3600000}
       RETRY_JITTER_RATIO: ${RETRY_JITTER_RATIO:-0.2}
       MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-8192}
+      WORKER_ID: ${WORKER_ID:-worker-1}
+      WORKER_HEARTBEAT_INTERVAL_MS: ${WORKER_HEARTBEAT_INTERVAL_MS:-5000}
     depends_on:
       migrate:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          const {Client}=require('pg'); const c=new Client({connectionString:process.env.DATABASE_URL});
+          c.connect().then(()=>c.query("SELECT 1 FROM worker_heartbeats WHERE worker_id=$1 AND active=true AND heartbeat_at>now()-interval '30 seconds'",[process.env.WORKER_ID||'worker-1'])).then(r=>{c.end();process.exit(r.rowCount===1?0:1)}).catch(()=>{c.end();process.exit(1)});
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
     restart: unless-stopped
     networks:
       - hookforge_backend

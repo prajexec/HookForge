@@ -92,6 +92,37 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL worker leasing", () => {
+  it("persists a fresh heartbeat and can mark the worker inactive", async () => {
+    await store.heartbeat({
+      workerId: "integration-worker",
+      concurrency: 2,
+      activeJobs: 1,
+    });
+    const active = await pool.query<{
+      active: boolean;
+      concurrency: number;
+      active_jobs: number;
+    }>(
+      "SELECT active, concurrency, active_jobs FROM worker_heartbeats WHERE worker_id = $1",
+      ["integration-worker"],
+    );
+    expect(active.rows[0]).toEqual({
+      active: true,
+      concurrency: 2,
+      active_jobs: 1,
+    });
+
+    await store.stopHeartbeat("integration-worker");
+    const stopped = await pool.query<{ active: boolean }>(
+      "SELECT active FROM worker_heartbeats WHERE worker_id = $1",
+      ["integration-worker"],
+    );
+    expect(stopped.rows[0]?.active).toBe(false);
+    await pool.query("DELETE FROM worker_heartbeats WHERE worker_id = $1", [
+      "integration-worker",
+    ]);
+  });
+
   it("claims a due delivery and records the complete attempt transaction", async () => {
     const job = await store.claimDueDelivery(60);
     expect(job).not.toBeNull();

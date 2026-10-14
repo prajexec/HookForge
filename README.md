@@ -25,12 +25,16 @@ The repository currently contains the following working slices:
   reconciliation APIs.
 - API-backed React dashboard for projects, endpoints, events, and deliveries.
 - ARM64-conscious multi-stage Docker images and Compose startup orchestration.
+- Bounded API rate limits, safe operational metrics, worker heartbeat health,
+  and a configurable k6 benchmark harness.
 - SSRF-aware endpoint URL validation and lifecycle actions.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
-  endpoint lifecycle, and URL policy.
+  endpoint lifecycle, URL policy, and the OpenAPI contract.
+- Deterministic OpenAPI 3.1 generation at `/openapi.json`, with a checked-in
+  artifact and CI freshness verification.
 
-Dockerized application services and OpenAPI generation are deliberately
-introduced in later tested milestones.
+The API contract is generated from the implemented route surface and checked in
+as `docs/api/openapi.json`; CI verifies that it remains current.
 
 ## Architecture direction
 
@@ -103,6 +107,8 @@ npm run typecheck
 npm test
 npm run test:integration
 npm run build
+npm run openapi:generate
+npm run openapi:check
 npm run compose:logs
 npm run compose:ps
 npm run compose:build
@@ -135,15 +141,23 @@ of the normal setup or cleanup flow.
 
 ## Screenshots and demo
 
-Dashboard screenshot and delivery demo GIF placeholders will be added after the
-real API-backed dashboard milestone.
+The media slots below are intentionally labeled placeholders until updated
+captures are available from the API-backed dashboard and delivery workflow.
+
+![HookForge dashboard screenshot placeholder](docs/media/dashboard-placeholder.svg)
+
+![HookForge delivery demo GIF placeholder](docs/media/delivery-demo-placeholder.svg)
+
+Replace these files with the real dashboard screenshot and delivery demo GIF;
+the README links can remain unchanged.
 
 ## Current limitations and roadmap
 
 The current milestone accepts, schedules, delivers, inspects, and replays
-events through the API and standalone worker process. The next milestones add
-the API-backed dashboard, Dockerized application services, and OpenAPI
-generation.
+events through the API and standalone worker process, with the dashboard,
+Docker deployment, operational observability, and OpenAPI contract now present.
+Future work should be driven by measured product and scale requirements rather
+than adding an unverified platform component.
 
 `npm test` runs fast in-memory unit and route tests. Once PostgreSQL and Redis
 are running, `npm run test:integration` applies migrations and runs the real

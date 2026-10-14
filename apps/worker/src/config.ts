@@ -21,6 +21,13 @@ const environmentSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  WORKER_ID: z.string().trim().min(1).max(128).default("worker-1"),
+  WORKER_HEARTBEAT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(30_000)
+    .default(5_000),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
   WORKER_POLL_INTERVAL_MS: z.coerce
     .number()

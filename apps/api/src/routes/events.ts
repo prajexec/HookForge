@@ -4,7 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { AppConfig } from "../config.js";
-import { badRequest, notFound } from "../errors.js";
+import { AppError, badRequest, notFound } from "../errors.js";
 import type { Metrics } from "../metrics.js";
 import type {
   EventCursor,
@@ -13,6 +13,7 @@ import type {
   JsonValue,
 } from "../store.js";
 import { authenticate } from "./auth.js";
+import { enforceRateLimit, type RateLimiter } from "../rate-limit.js";
 
 const eventParamsSchema = z.object({ projectId: z.string().uuid() }).strict();
 const eventBodySchema = z.object({
@@ -140,11 +141,12 @@ interface RouteOptions {
   config: AppConfig;
   store: HookForgeStore;
   metrics: Metrics;
+  rateLimiter?: RateLimiter;
 }
 
 export async function registerEventRoutes(
   app: FastifyInstance,
-  { config, store, metrics }: RouteOptions,
+  { config, store, metrics, rateLimiter }: RouteOptions,
 ): Promise<void> {
   app.get("/api/v1/projects/:projectId/events", async (request, reply) => {
     const auth = await authenticate(request, store);
@@ -169,8 +171,23 @@ export async function registerEventRoutes(
   });
 
   app.post("/api/v1/projects/:projectId/events", async (request, reply) => {
-    const auth = await authenticate(request, store);
+    let auth;
+    try {
+      auth = await authenticate(request, store);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "UNAUTHORIZED") {
+        enforceEventRateLimit(rateLimiter, config, request.ip);
+      }
+      throw error;
+    }
     const params = parse(eventParamsSchema, request.params);
+    enforceEventRateLimit(
+      rateLimiter,
+      config,
+      request.ip,
+      auth.user.id,
+      params.projectId,
+    );
     const body = parse(eventBodySchema, request.body);
     if (!isJsonValue(body.payload)) {
       throw badRequest("INVALID_PAYLOAD", "Event payload must be valid JSON");
@@ -212,5 +229,23 @@ export async function registerEventRoutes(
       deliveriesScheduled: result.deliveryCount,
       deduplicated: result.deduplicated,
     });
+  });
+}
+
+function enforceEventRateLimit(
+  rateLimiter: RateLimiter | undefined,
+  config: AppConfig,
+  ip: string,
+  userId?: string,
+  projectId?: string,
+): void {
+  if (!rateLimiter) return;
+  const key =
+    userId !== undefined && projectId !== undefined
+      ? `events:user:${userId}:project:${projectId}`
+      : `events:ip:${ip || "unknown"}`;
+  enforceRateLimit(rateLimiter, key, {
+    maxRequests: config.RATE_LIMIT_EVENT_MAX_REQUESTS,
+    windowSeconds: config.RATE_LIMIT_EVENT_WINDOW_SECONDS,
   });
 }

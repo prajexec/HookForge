@@ -13,7 +13,10 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "bench": "k6 run benchmarks/api.js",
     "db:migrate": "tsx scripts/migrate.ts",
+    "openapi:generate": "tsx scripts/generate-openapi.ts",
+    "openapi:check": "tsx scripts/verify-openapi.ts",
     "dev:api": "npm --workspace @hookforge/api run dev",
     "dev:web": "npm --workspace @hookforge/web run dev",
     "format": "prettier --write .",
@@ -29,7 +32,8 @@
     "compose:down": "docker compose down",
     "compose:logs": "docker compose logs -f --tail=100",
     "compose:build": "docker compose build",
-    "compose:ps": "docker compose ps"
+    "compose:ps": "docker compose ps",
+    "verify:deployment": "node scripts/verify-deployment.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
