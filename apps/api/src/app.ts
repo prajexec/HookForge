@@ -61,10 +61,16 @@ export async function buildApp({
     metrics.recordError(errorCode(error));
   });
 
+  app.addHook("onSend", async (request, reply) => {
+    reply.header("x-request-id", request.id);
+  });
+
   app.addHook("onResponse", async (request, reply) => {
     metrics.recordResponse(
       reply.statusCode,
       performance.now() - (requestStartedAt.get(request) ?? performance.now()),
+      request.method,
+      request.routeOptions.url,
     );
   });
 
@@ -92,12 +98,40 @@ export async function buildApp({
     });
   });
 
-  app.get("/metrics", async (_request, reply) => {
+  app.get("/metrics", async (request, reply) => {
+    if (
+      typeof request.headers.accept === "string" &&
+      request.headers.accept.includes("text/plain")
+    ) {
+      try {
+        metrics.setOperationalMetrics(
+          await dependencies.store.getOperationalMetrics(),
+        );
+      } catch {
+        // Runtime counters remain scrapeable while the database is unavailable.
+      }
+      return reply
+        .type(metrics.registry.contentType)
+        .send(await metrics.prometheus());
+    }
     const [runtime, operational] = await Promise.all([
       Promise.resolve(metrics.snapshot()),
       dependencies.store.getOperationalMetrics(),
     ]);
     return reply.send({ ...runtime, operational });
+  });
+
+  app.get("/metrics/prometheus", async (_request, reply) => {
+    try {
+      metrics.setOperationalMetrics(
+        await dependencies.store.getOperationalMetrics(),
+      );
+    } catch {
+      // Runtime counters remain scrapeable while the database is unavailable.
+    }
+    return reply
+      .type(metrics.registry.contentType)
+      .send(await metrics.prometheus());
   });
 
   app.get("/openapi.json", async (_request, reply) => {
@@ -113,6 +147,7 @@ export async function buildApp({
   await registerEndpointRoutes(app, {
     config,
     store: dependencies.store,
+    ...(dependencies.encryption ? { encryption: dependencies.encryption } : {}),
     ...(endpointUrlValidator ? { urlValidator: endpointUrlValidator } : {}),
   });
   await registerEventRoutes(app, {
@@ -129,6 +164,7 @@ export async function buildApp({
   await registerSandboxRoutes(app, {
     config,
     store: dependencies.store,
+    ...(dependencies.encryption ? { encryption: dependencies.encryption } : {}),
   });
 
   app.setErrorHandler((error, request, reply) => {

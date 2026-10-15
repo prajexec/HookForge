@@ -3,6 +3,10 @@ import { createClient } from "redis";
 
 import type { AppConfig } from "./config.js";
 import { PgStore, type HookForgeStore } from "./store.js";
+import {
+  EnvelopeEncryption,
+  type SecretEncryption,
+} from "./security/envelope.js";
 
 export interface DatabaseHealthClient {
   query: (text: string, values?: readonly unknown[]) => Promise<unknown>;
@@ -16,6 +20,7 @@ export interface AppDependencies {
   db: DatabaseHealthClient;
   redis: RedisHealthClient;
   store: HookForgeStore;
+  encryption?: SecretEncryption;
   connect: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -28,6 +33,10 @@ export function createDependencies(config: AppConfig): AppDependencies {
     idleTimeoutMillis: 30_000,
   });
   const redis = createClient({ url: config.REDIS_URL });
+  const encryption =
+    config.ENVELOPE_PROVIDER === "vault"
+      ? new EnvelopeEncryption(pool, config)
+      : undefined;
 
   redis.on("error", (error) => {
     // The API's request logger owns structured application logging. This
@@ -45,6 +54,7 @@ export function createDependencies(config: AppConfig): AppDependencies {
       ping: () => redis.ping(),
     },
     store: new PgStore(pool),
+    ...(encryption ? { encryption } : {}),
     connect: async () => {
       if (!redis.isOpen) {
         await redis.connect();

@@ -60,6 +60,23 @@ const environmentSchema = z.object({
     .min(1_024)
     .max(200_000)
     .default(131_072),
+  ENVELOPE_PROVIDER: z.enum(["legacy", "vault"]).default("legacy"),
+  ENVELOPE_KEY_CACHE_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(300),
+  VAULT_ADDR: z.string().url().default("http://localhost:8200"),
+  VAULT_NAMESPACE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().min(1).optional(),
+  ),
+  VAULT_TOKEN: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().min(1).optional(),
+  ),
+  VAULT_TRANSIT_KEY: z.string().trim().min(1).default("hookforge-secrets"),
   SECRET_ENCRYPTION_KEY: z
     .string()
     .regex(/^[A-Za-z0-9+/]+={0,2}$/, "must be base64")
@@ -105,10 +122,20 @@ export function parseConfig(
 
   if (
     result.data.NODE_ENV === "production" &&
+    result.data.ENVELOPE_PROVIDER === "legacy" &&
     !result.data.SECRET_ENCRYPTION_KEY
   ) {
     throw new Error(
-      "Invalid environment configuration: SECRET_ENCRYPTION_KEY is required in production",
+      "Invalid environment configuration: SECRET_ENCRYPTION_KEY is required in production when ENVELOPE_PROVIDER=legacy",
+    );
+  }
+  if (
+    result.data.NODE_ENV === "production" &&
+    result.data.ENVELOPE_PROVIDER === "vault" &&
+    (!result.data.VAULT_TOKEN || !result.data.VAULT_TRANSIT_KEY)
+  ) {
+    throw new Error(
+      "Invalid environment configuration: VAULT_TOKEN and VAULT_TRANSIT_KEY are required in production when ENVELOPE_PROVIDER=vault",
     );
   }
   if (

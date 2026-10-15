@@ -33,11 +33,19 @@ npm run dev:web
 `RATE_LIMIT_*`, `SESSION_TTL_SECONDS`, `MAX_EVENT_PAYLOAD_BYTES`, `SECRET_ENCRYPTION_KEY`, and
 `ALLOW_PRIVATE_ENDPOINTS`, `SANDBOX_ENABLED`, and the sandbox receiver URLs are
 validated by Zod at API startup. Worker-specific
-concurrency, lease, timeout, retry, and response-size settings are validated by
+concurrency, per-endpoint/project in-flight quota, lease, timeout, retry, and
+response-size settings are validated by
 the worker process. `.env` is
 ignored by Git. The example encryption key and database password are local-only
 and must not be reused in production. Production refuses to start without an
 explicit encryption key.
+
+Rate limiting defaults to Redis token buckets. All API replicas must use the
+same Redis database and `RATE_LIMIT_*` policies. `*_MAX_REQUESTS` sets burst
+capacity and `*_WINDOW_SECONDS` sets the continuous full-refill duration, not a
+fixed reset interval. `RATE_LIMIT_MAX_ENTRIES` is retired for this limiter; it
+was a cap on the former process-local map. See the
+[runbook](../operations/RUNBOOK.md#rate-limits) for defaults and failure behavior.
 
 ## Checks
 
@@ -57,6 +65,13 @@ cookies. Unit and route tests use in-memory dependency doubles and do not
 require internet access. The integration command
 requires the local PostgreSQL service and applies all migrations before testing
 the real event and worker transactions.
+
+Rate limiting is disabled by default when `NODE_ENV=test` unless
+`RATE_LIMIT_ENABLED=true` is set. `InMemoryRateLimiter` is retained only as an
+explicitly injected test double; enabling rate limiting does not automatically
+select it. Tests of the default distributed limiter need Redis. In normal
+operation, a Redis failure returns `503 RATE_LIMIT_UNAVAILABLE` rather than
+switching to an in-memory limiter.
 
 ## Migrations
 

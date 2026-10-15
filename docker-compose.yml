@@ -60,10 +60,18 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       MAX_EVENT_PAYLOAD_BYTES: ${MAX_EVENT_PAYLOAD_BYTES:-131072}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      ENVELOPE_PROVIDER: ${ENVELOPE_PROVIDER:-legacy}
+      ENVELOPE_KEY_CACHE_TTL_SECONDS: ${ENVELOPE_KEY_CACHE_TTL_SECONDS:-300}
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_NAMESPACE: ${VAULT_NAMESPACE:-}
+      VAULT_TOKEN: ${VAULT_TOKEN:-}
+      VAULT_TRANSIT_KEY: ${VAULT_TRANSIT_KEY:-hookforge-secrets}
       ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-true}
       SANDBOX_ENABLED: ${SANDBOX_ENABLED:-true}
       SANDBOX_RECEIVER_INTERNAL_URL: ${SANDBOX_RECEIVER_INTERNAL_URL:-http://mock-receiver:8080}
       SANDBOX_RECEIVER_PUBLIC_URL: ${SANDBOX_RECEIVER_PUBLIC_URL:-http://localhost:8080}
+      OTEL_SERVICE_NAME: ${OTEL_API_SERVICE_NAME:-hookforge-api}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "127.0.0.1:${API_PORT:-3000}:3000"
     depends_on:
@@ -97,8 +105,16 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      ENVELOPE_PROVIDER: ${ENVELOPE_PROVIDER:-legacy}
+      ENVELOPE_KEY_CACHE_TTL_SECONDS: ${ENVELOPE_KEY_CACHE_TTL_SECONDS:-300}
+      VAULT_ADDR: ${VAULT_ADDR:-http://vault:8200}
+      VAULT_NAMESPACE: ${VAULT_NAMESPACE:-}
+      VAULT_TOKEN: ${VAULT_TOKEN:-}
+      VAULT_TRANSIT_KEY: ${VAULT_TRANSIT_KEY:-hookforge-secrets}
       ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-true}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      WORKER_MAX_IN_FLIGHT_PER_ENDPOINT: ${WORKER_MAX_IN_FLIGHT_PER_ENDPOINT:-1}
+      WORKER_MAX_IN_FLIGHT_PER_PROJECT: ${WORKER_MAX_IN_FLIGHT_PER_PROJECT:-5}
       WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-250}
       WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
       WORKER_REQUEST_TIMEOUT_MS: ${WORKER_REQUEST_TIMEOUT_MS:-10000}
@@ -109,6 +125,10 @@ services:
       MAX_RESPONSE_BYTES: ${MAX_RESPONSE_BYTES:-8192}
       WORKER_ID: ${WORKER_ID:-worker-1}
       WORKER_HEARTBEAT_INTERVAL_MS: ${WORKER_HEARTBEAT_INTERVAL_MS:-5000}
+      WORKER_METRICS_HOST: ${WORKER_METRICS_HOST:-0.0.0.0}
+      WORKER_METRICS_PORT: ${WORKER_METRICS_PORT:-9464}
+      OTEL_SERVICE_NAME: ${OTEL_WORKER_SERVICE_NAME:-hookforge-worker}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -129,6 +149,32 @@ services:
       retries: 6
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - hookforge_backend
+
+  retention:
+    build:
+      context: .
+      target: retention
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
+      ARCHIVE_AFTER_MONTHS: ${ARCHIVE_AFTER_MONTHS:-3}
+      PURGE_AFTER_MONTHS: ${PURGE_AFTER_MONTHS:-24}
+      PARTITION_LOOKAHEAD_MONTHS: ${PARTITION_LOOKAHEAD_MONTHS:-2}
+      RETENTION_BATCH_SIZE: ${RETENTION_BATCH_SIZE:-100}
+      RETENTION_DRY_RUN: ${RETENTION_DRY_RUN:-false}
+      RETENTION_INTERVAL_SECONDS: ${RETENTION_INTERVAL_SECONDS:-86400}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - while true; do npm run db:retention; sleep "$${RETENTION_INTERVAL_SECONDS}"; done
     networks:
       - hookforge_backend
 

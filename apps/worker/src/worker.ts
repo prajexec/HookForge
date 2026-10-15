@@ -6,6 +6,7 @@ import {
 } from "./delivery-store.js";
 import { deliverJob } from "./delivery.js";
 import { calculateBackoffDelay, parseRetryAfter } from "./retry.js";
+import type { WorkerMetrics } from "./metrics.js";
 
 export interface WorkerLogger {
   info(bindings: object, message: string): void;
@@ -25,10 +26,12 @@ const defaultLogger: WorkerLogger = {
 interface WorkerOptions {
   store: DeliveryStore;
   config: WorkerConfig;
-  fetchImpl?: typeof fetch;
+  requestImpl?: Parameters<typeof deliverJob>[1]["requestImpl"];
+  resolve?: Parameters<typeof deliverJob>[1]["resolve"];
   logger?: WorkerLogger;
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
+  metrics?: WorkerMetrics;
 }
 
 export class DeliveryWorker {
@@ -82,21 +85,45 @@ export class DeliveryWorker {
   public async runOnce(): Promise<boolean> {
     const config = this.options.config;
     this.activeJobs += 1;
+    this.options.metrics?.activeJobs.inc();
+    const startedAt = performance.now();
     try {
-      const job = await this.options.store.claimDueDelivery(
-        config.WORKER_LEASE_SECONDS,
-      );
-      if (!job) return false;
+      const job = await this.options.store.claimDueDelivery({
+        leaseSeconds: config.WORKER_LEASE_SECONDS,
+        maxInFlightPerEndpoint: config.WORKER_MAX_IN_FLIGHT_PER_ENDPOINT,
+        maxInFlightPerProject: config.WORKER_MAX_IN_FLIGHT_PER_PROJECT,
+      });
+      if (!job) {
+        this.options.metrics?.claims.labels("empty").inc();
+        return false;
+      }
+      this.options.metrics?.claims.labels("claimed").inc();
 
       const result = await deliverJob(job, {
         encryptionKey: config.SECRET_ENCRYPTION_KEY,
         allowPrivateEndpoints: config.ALLOW_PRIVATE_ENDPOINTS,
         requestTimeoutMs: config.WORKER_REQUEST_TIMEOUT_MS,
         maxResponseBytes: config.MAX_RESPONSE_BYTES,
-        ...(this.options.fetchImpl
-          ? { fetchImpl: this.options.fetchImpl }
+        ...(this.options.requestImpl
+          ? { requestImpl: this.options.requestImpl }
           : {}),
+        ...(this.options.resolve ? { resolve: this.options.resolve } : {}),
+        ...(this.options.store.resolveEncryptionKey
+          ? {
+              resolveEncryptionKey:
+                this.options.store.resolveEncryptionKey.bind(
+                  this.options.store,
+                ),
+            }
+          : {}),
+        allowLegacyEncryption: config.LEGACY_ENCRYPTION_KEY_CONFIGURED,
       });
+      if (
+        result.errorClassification === "encryption_decryption_failed" ||
+        result.errorClassification === "ssrf_or_secret_validation_failed"
+      ) {
+        this.options.metrics?.decryptFailures.inc();
+      }
 
       let outcome = result.outcome;
       let classification = result.errorClassification;
@@ -141,11 +168,19 @@ export class DeliveryWorker {
         nextAttemptAt,
       };
       await this.options.store.recordAttempt(attempt);
+      this.options.metrics?.attempts.labels(outcome, classification).inc();
+      this.options.metrics?.duration
+        .labels(outcome)
+        .observe(
+          (result.responseDurationMs ?? performance.now() - startedAt) / 1_000,
+        );
 
       this.logger.info(
         {
           deliveryId: job.id,
           eventId: job.eventId,
+          sourceRequestId: job.sourceRequestId,
+          traceId: job.traceparent?.split("-")[1] ?? null,
           attempt: job.attemptNumber,
           outcome,
           statusCode: result.httpStatusCode,
@@ -155,6 +190,7 @@ export class DeliveryWorker {
       return true;
     } finally {
       this.activeJobs -= 1;
+      this.options.metrics?.activeJobs.dec();
     }
   }
 

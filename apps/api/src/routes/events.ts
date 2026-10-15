@@ -14,6 +14,7 @@ import type {
 } from "../store.js";
 import { authenticate } from "./auth.js";
 import { enforceRateLimit, type RateLimiter } from "../rate-limit.js";
+import { currentTraceCarrier, withSpan } from "../telemetry.js";
 
 const eventParamsSchema = z.object({ projectId: z.string().uuid() }).strict();
 const eventBodySchema = z.object({
@@ -176,12 +177,12 @@ export async function registerEventRoutes(
       auth = await authenticate(request, store);
     } catch (error) {
       if (error instanceof AppError && error.code === "UNAUTHORIZED") {
-        enforceEventRateLimit(rateLimiter, config, request.ip);
+        await enforceEventRateLimit(rateLimiter, config, request.ip);
       }
       throw error;
     }
     const params = parse(eventParamsSchema, request.params);
-    enforceEventRateLimit(
+    await enforceEventRateLimit(
       rateLimiter,
       config,
       request.ip,
@@ -192,10 +193,8 @@ export async function registerEventRoutes(
     if (!isJsonValue(body.payload)) {
       throw badRequest("INVALID_PAYLOAD", "Event payload must be valid JSON");
     }
-    const payloadBytes = Buffer.byteLength(
-      JSON.stringify(body.payload),
-      "utf8",
-    );
+    const payload = body.payload;
+    const payloadBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
     if (payloadBytes > config.MAX_EVENT_PAYLOAD_BYTES) {
       throw badRequest(
         "PAYLOAD_TOO_LARGE",
@@ -203,13 +202,23 @@ export async function registerEventRoutes(
       );
     }
     const idempotencyKey = idempotencyKeyFromRequest(request);
-    const result = await store.ingestEvent({
-      ownerId: auth.user.id,
-      projectId: params.projectId,
-      eventType: body.eventType,
-      payload: body.payload,
-      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-      requestHash: requestHash(body.eventType, body.payload),
+    const result = await withSpan("hookforge.ingest", async () => {
+      const traceCarrier = currentTraceCarrier();
+      return store.ingestEvent({
+        ownerId: auth.user.id,
+        projectId: params.projectId,
+        eventType: body.eventType,
+        payload,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+        requestHash: requestHash(body.eventType, payload),
+        sourceRequestId: request.id,
+        ...(traceCarrier.traceparent
+          ? { traceparent: traceCarrier.traceparent }
+          : {}),
+        ...(traceCarrier.tracestate
+          ? { tracestate: traceCarrier.tracestate }
+          : {}),
+      });
     });
 
     metrics.increment(
@@ -232,19 +241,19 @@ export async function registerEventRoutes(
   });
 }
 
-function enforceEventRateLimit(
+async function enforceEventRateLimit(
   rateLimiter: RateLimiter | undefined,
   config: AppConfig,
   ip: string,
   userId?: string,
   projectId?: string,
-): void {
+): Promise<void> {
   if (!rateLimiter) return;
   const key =
     userId !== undefined && projectId !== undefined
       ? `events:user:${userId}:project:${projectId}`
       : `events:ip:${ip || "unknown"}`;
-  enforceRateLimit(rateLimiter, key, {
+  await enforceRateLimit(rateLimiter, key, {
     maxRequests: config.RATE_LIMIT_EVENT_MAX_REQUESTS,
     windowSeconds: config.RATE_LIMIT_EVENT_WINDOW_SECONDS,
   });

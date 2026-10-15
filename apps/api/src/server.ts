@@ -1,6 +1,7 @@
 import { buildApp } from "./app.js";
 import { parseConfig } from "./config.js";
 import { createDependencies } from "./dependencies.js";
+import { shutdownTelemetry } from "./telemetry.js";
 
 const config = parseConfig();
 const dependencies = createDependencies(config);
@@ -10,6 +11,7 @@ const shutdown = async (signal: string): Promise<void> => {
   app.log.info({ signal }, "Shutting down API");
   await app.close();
   await dependencies.close();
+  await shutdownTelemetry();
 };
 
 process.once("SIGINT", () => {

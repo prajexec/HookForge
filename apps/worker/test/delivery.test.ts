@@ -17,7 +17,7 @@ describe("HTTP delivery", () => {
       allowPrivateEndpoints: false,
       requestTimeoutMs: 1_000,
       maxResponseBytes: 100,
-      fetchImpl: async (_url, init) => {
+      requestImpl: async (_target, init) => {
         receivedBody = String(init?.body);
         receivedHeaders = new Headers(init?.headers);
         return new Response("accepted", { status: 200 });
@@ -45,7 +45,7 @@ describe("HTTP delivery", () => {
       allowPrivateEndpoints: false,
       requestTimeoutMs: 1_000,
       maxResponseBytes: 4,
-      fetchImpl: async () => new Response("too-large", { status: 200 }),
+      requestImpl: async () => new Response("too-large", { status: 200 }),
     });
 
     expect(result.outcome).toBe("failed");
@@ -66,7 +66,7 @@ describe("HTTP delivery", () => {
         allowPrivateEndpoints: false,
         requestTimeoutMs: 1_000,
         maxResponseBytes: 100,
-        fetchImpl: async (_url, init) => {
+        requestImpl: async (_target, init) => {
           receivedHeaders = new Headers(init?.headers);
           return new Response("accepted", { status: 200 });
         },
@@ -78,6 +78,30 @@ describe("HTTP delivery", () => {
     expect(receivedHeaders?.get("x-hookforge-signature")).toMatch(/^v1=/);
   });
 
+  it("continues the persisted queue trace into the receiver request", async () => {
+    let receivedHeaders: Headers | undefined;
+    const result = await deliverJob(
+      deliveryJob({
+        traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      }),
+      {
+        encryptionKey,
+        allowPrivateEndpoints: false,
+        requestTimeoutMs: 1_000,
+        maxResponseBytes: 100,
+        requestImpl: async (_target, init) => {
+          receivedHeaders = new Headers(init?.headers);
+          return new Response("accepted", { status: 200 });
+        },
+      },
+    );
+
+    expect(result.outcome).toBe("success");
+    expect(receivedHeaders?.get("traceparent")).toMatch(
+      /^00-4bf92f3577b34da6a3ce929d0e0e4736-[0-9a-f]{16}-01$/,
+    );
+  });
+
   it("rejects private destinations again at delivery time", async () => {
     let called = false;
     const result = await deliverJob(
@@ -87,7 +111,7 @@ describe("HTTP delivery", () => {
         allowPrivateEndpoints: false,
         requestTimeoutMs: 1_000,
         maxResponseBytes: 100,
-        fetchImpl: async () => {
+        requestImpl: async () => {
           called = true;
           return new Response("unexpected", { status: 200 });
         },

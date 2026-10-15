@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { badRequest, conflict, notFound } from "../errors.js";
 import { encryptSecret, generateSigningSecret } from "../security/crypto.js";
+import type { SecretEncryption } from "../security/envelope.js";
 import {
   createEndpointUrlValidator,
   type EndpointUrlValidator,
@@ -14,6 +15,7 @@ import type {
   HookForgeStore,
 } from "../store.js";
 import { authenticate } from "./auth.js";
+import { activeTraceIds } from "../telemetry.js";
 
 const endpointParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -42,6 +44,9 @@ const headersSchema = z
       "x-hookforge-event-id",
       "x-hookforge-timestamp",
       "x-hookforge-signature",
+      "x-hookforge-delivery-id",
+      "traceparent",
+      "tracestate",
     ]);
     for (const name of Object.keys(headers)) {
       if (reserved.has(name.toLowerCase())) {
@@ -118,16 +123,23 @@ function endpointResponse(endpoint: EndpointRecord) {
   };
 }
 
-function encryptHeaders(
+async function encryptHeaders(
   headers: Record<string, string>,
   encryptionKey: string,
-): EncryptedHeaderMap {
-  return Object.fromEntries(
-    Object.entries(headers).map(([name, value]) => [
-      name,
-      encryptSecret(value, encryptionKey),
-    ]),
+  encryption?: SecretEncryption,
+): Promise<EncryptedHeaderMap> {
+  const entries = await Promise.all(
+    Object.entries(headers).map(
+      async ([name, value]) =>
+        [
+          name,
+          encryption
+            ? await encryption.encrypt(value)
+            : encryptSecret(value, encryptionKey),
+        ] as const,
+    ),
   );
+  return Object.fromEntries(entries);
 }
 
 function endpointNotFound(endpoint: EndpointRecord | null): EndpointRecord {
@@ -137,10 +149,21 @@ function endpointNotFound(endpoint: EndpointRecord | null): EndpointRecord {
   return endpoint;
 }
 
+function auditContext(request: { id: string }, actorId: string) {
+  const traceId = activeTraceIds().traceId;
+  return {
+    actorType: "user" as const,
+    actorId,
+    requestId: request.id,
+    ...(traceId ? { traceId } : {}),
+  };
+}
+
 interface RouteOptions {
   config: AppConfig;
   store: HookForgeStore;
   urlValidator?: EndpointUrlValidator;
+  encryption?: SecretEncryption;
 }
 
 export async function registerEndpointRoutes(
@@ -151,6 +174,7 @@ export async function registerEndpointRoutes(
     urlValidator = createEndpointUrlValidator({
       allowPrivate: config.ALLOW_PRIVATE_ENDPOINTS,
     }),
+    encryption,
   }: RouteOptions,
 ): Promise<void> {
   app.post("/api/v1/projects/:projectId/endpoints", async (request, reply) => {
@@ -168,12 +192,16 @@ export async function registerEndpointRoutes(
       name: input.name,
       nameNormalized: input.name.toLocaleLowerCase(),
       url,
-      secret: encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
-      staticHeaders: encryptHeaders(
+      secret: encryption
+        ? await encryption.encrypt(signingSecret)
+        : encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
+      staticHeaders: await encryptHeaders(
         input.headers,
         config.SECRET_ENCRYPTION_KEY,
+        encryption,
       ),
       eventPatterns: input.eventPatterns,
+      audit: auditContext(request, auth.user.id),
     });
 
     return reply.code(201).send({
@@ -237,9 +265,10 @@ export async function registerEndpointRoutes(
           update.url = url;
         }
         if (input.headers !== undefined) {
-          update.staticHeaders = encryptHeaders(
+          update.staticHeaders = await encryptHeaders(
             input.headers,
             config.SECRET_ENCRYPTION_KEY,
+            encryption,
           );
         }
         const endpoint = endpointNotFound(
@@ -248,6 +277,7 @@ export async function registerEndpointRoutes(
             params.projectId,
             params.endpointId!,
             update,
+            auditContext(request, auth.user.id),
           ),
         );
         return reply.send({ endpoint: endpointResponse(endpoint) });
@@ -291,7 +321,10 @@ export async function registerEndpointRoutes(
           auth.user.id,
           params.projectId,
           params.endpointId!,
-          encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
+          encryption
+            ? await encryption.encrypt(signingSecret)
+            : encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
+          auditContext(request, auth.user.id),
         ),
       );
       return reply.send({

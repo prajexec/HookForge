@@ -1,12 +1,22 @@
-import { decryptSecret } from "./crypto.js";
+import { decryptSecret, decryptSecretWithKey } from "./crypto.js";
 import type { DeliveryJob } from "./delivery-store.js";
-import { validateDeliveryUrl } from "./network.js";
+import { requestPinned } from "./http-client.js";
+import {
+  resolveDeliveryTarget,
+  type DeliveryAddressResolver,
+  type ResolvedDeliveryTarget,
+} from "./network.js";
 import {
   classifyHttpStatus,
   classifyNetworkError,
   type DeliveryOutcome,
 } from "./retry.js";
 import { buildSignatureHeaders, stableJson } from "./signature.js";
+import {
+  extractTraceContext,
+  injectTraceHeaders,
+  withSpan,
+} from "./telemetry.js";
 
 export interface DeliveryResult {
   requestAt: Date;
@@ -25,8 +35,40 @@ interface DeliveryOptions {
   allowPrivateEndpoints: boolean;
   requestTimeoutMs: number;
   maxResponseBytes: number;
-  fetchImpl?: typeof fetch;
+  requestImpl?: (
+    target: ResolvedDeliveryTarget,
+    init: {
+      method: "POST";
+      headers: Record<string, string>;
+      body: string;
+      signal: AbortSignal;
+    },
+  ) => Promise<Response>;
+  resolve?: DeliveryAddressResolver;
   now?: () => Date;
+  resolveEncryptionKey?: (version: number) => Promise<Buffer>;
+  allowLegacyEncryption?: boolean;
+}
+
+async function decryptJobSecret(
+  encrypted: Parameters<typeof decryptSecret>[0],
+  options: DeliveryOptions,
+): Promise<string> {
+  if (encrypted.encryptionKeyVersion !== undefined) {
+    if (!options.resolveEncryptionKey) {
+      throw new Error("Envelope key resolver is not configured");
+    }
+    return decryptSecretWithKey(
+      encrypted,
+      await options.resolveEncryptionKey(encrypted.encryptionKeyVersion),
+    );
+  }
+  if (options.allowLegacyEncryption === false) {
+    throw new Error(
+      "Legacy ciphertext is disabled without SECRET_ENCRYPTION_KEY",
+    );
+  }
+  return decryptSecret(encrypted, options.encryptionKey);
 }
 
 function boundedError(error: unknown): string {
@@ -80,27 +122,47 @@ export async function deliverJob(
   job: DeliveryJob,
   options: DeliveryOptions,
 ): Promise<DeliveryResult> {
+  return withSpan(
+    "hookforge.delivery",
+    async () => deliverJobInternal(job, options),
+    extractTraceContext({
+      traceparent: job.traceparent,
+      tracestate: job.tracestate,
+    }),
+  );
+}
+
+async function deliverJobInternal(
+  job: DeliveryJob,
+  options: DeliveryOptions,
+): Promise<DeliveryResult> {
   const now = options.now ?? (() => new Date());
   const requestAt = now();
-  let validatedUrl: string;
+  let target: ResolvedDeliveryTarget;
   let secret: string;
   let staticHeaders: Record<string, string>;
   try {
-    validatedUrl = await validateDeliveryUrl(
+    target = await resolveDeliveryTarget(
       job.endpointUrl,
       options.allowPrivateEndpoints,
+      options.resolve,
     );
-    secret = decryptSecret(job.encryptedSecret, options.encryptionKey);
+    secret = await decryptJobSecret(job.encryptedSecret, options);
     staticHeaders = Object.fromEntries(
-      Object.entries(job.encryptedStaticHeaders).map(([name, encrypted]) => {
-        const value = decryptSecret(encrypted, options.encryptionKey);
-        if (/[\r\n]/.test(value)) {
-          throw new Error("Custom header values must not contain CR/LF");
-        }
-        return [name, value];
-      }),
+      await Promise.all(
+        Object.entries(job.encryptedStaticHeaders).map(
+          async ([name, encrypted]) => {
+            const value = await decryptJobSecret(encrypted, options);
+            if (/[\r\n]/.test(value)) {
+              throw new Error("Custom header values must not contain CR/LF");
+            }
+            return [name, value];
+          },
+        ),
+      ),
     );
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "";
     return {
       requestAt,
       responseAt: null,
@@ -108,9 +170,10 @@ export async function deliverJob(
       httpStatusCode: null,
       responseExcerpt: null,
       retryAfter: null,
-      errorClassification:
-        error instanceof Error && error.message.startsWith("dns_")
-          ? "dns_resolution_failed"
+      errorClassification: errorMessage.startsWith("dns_")
+        ? "dns_resolution_failed"
+        : /(?:Vault|Envelope|encryption key|auth tag)/i.test(errorMessage)
+          ? "encryption_decryption_failed"
           : "ssrf_or_secret_validation_failed",
       lastError: boundedError(error),
       outcome: "failed",
@@ -123,7 +186,6 @@ export async function deliverJob(
     payload: job.payload,
   });
   const timestampSeconds = Math.floor(requestAt.getTime() / 1_000);
-  const fetchFunction = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
@@ -131,20 +193,27 @@ export async function deliverJob(
   );
 
   try {
-    const response = await fetchFunction(validatedUrl, {
+    const requestHeaders = {
+      ...staticHeaders,
+      "x-hookforge-delivery-id": job.id,
+      ...buildSignatureHeaders({
+        eventId: job.eventId,
+        timestampSeconds,
+        rawBody,
+        secret,
+      }),
+    };
+    const requestInit = {
       method: "POST",
-      headers: {
-        ...staticHeaders,
-        ...buildSignatureHeaders({
-          eventId: job.eventId,
-          timestampSeconds,
-          rawBody,
-          secret,
-        }),
-      },
+      headers: requestHeaders,
       body: rawBody,
-      redirect: "error",
       signal: controller.signal,
+    } as const;
+    const response = await withSpan("hookforge.http.receiver", async () => {
+      injectTraceHeaders(requestHeaders);
+      return options.requestImpl
+        ? options.requestImpl(target, requestInit)
+        : requestPinned(target, requestInit);
     });
     const responseAt = now();
     const responseDurationMs = responseAt.getTime() - requestAt.getTime();

@@ -10,6 +10,8 @@ const environmentSchema = z.object({
     .default(
       "postgresql://hookforge:hookforge_dev_only@localhost:5432/hookforge",
     ),
+  WORKER_METRICS_HOST: z.string().min(1).default("127.0.0.1"),
+  WORKER_METRICS_PORT: z.coerce.number().int().min(1).max(65_535).default(9464),
   SECRET_ENCRYPTION_KEY: z
     .string()
     .regex(/^[A-Za-z0-9+/]+={0,2}$/, "must be base64")
@@ -17,6 +19,23 @@ const environmentSchema = z.object({
       message: "must decode to 32 bytes",
     })
     .optional(),
+  ENVELOPE_PROVIDER: z.enum(["legacy", "vault"]).default("legacy"),
+  ENVELOPE_KEY_CACHE_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(86_400)
+    .default(300),
+  VAULT_ADDR: z.string().url().default("http://localhost:8200"),
+  VAULT_NAMESPACE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().trim().min(1).optional(),
+  ),
+  VAULT_TOKEN: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().min(1).optional(),
+  ),
+  VAULT_TRANSIT_KEY: z.string().trim().min(1).default("hookforge-secrets"),
   ALLOW_PRIVATE_ENDPOINTS: z
     .enum(["true", "false"])
     .default("false")
@@ -29,6 +48,18 @@ const environmentSchema = z.object({
     .max(30_000)
     .default(5_000),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
+  WORKER_MAX_IN_FLIGHT_PER_ENDPOINT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(1),
+  WORKER_MAX_IN_FLIGHT_PER_PROJECT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000)
+    .default(5),
   WORKER_POLL_INTERVAL_MS: z.coerce
     .number()
     .int()
@@ -67,7 +98,10 @@ const environmentSchema = z.object({
 export type WorkerConfig = Omit<
   z.infer<typeof environmentSchema>,
   "SECRET_ENCRYPTION_KEY"
-> & { SECRET_ENCRYPTION_KEY: string };
+> & {
+  SECRET_ENCRYPTION_KEY: string;
+  LEGACY_ENCRYPTION_KEY_CONFIGURED: boolean;
+};
 
 const localEncryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -80,10 +114,20 @@ export function parseWorkerConfig(
   }
   if (
     result.data.NODE_ENV === "production" &&
+    result.data.ENVELOPE_PROVIDER === "legacy" &&
     !result.data.SECRET_ENCRYPTION_KEY
   ) {
     throw new Error(
-      "Invalid worker configuration: SECRET_ENCRYPTION_KEY is required in production",
+      "Invalid worker configuration: SECRET_ENCRYPTION_KEY is required in production when ENVELOPE_PROVIDER=legacy",
+    );
+  }
+  if (
+    result.data.NODE_ENV === "production" &&
+    result.data.ENVELOPE_PROVIDER === "vault" &&
+    (!result.data.VAULT_TOKEN || !result.data.VAULT_TRANSIT_KEY)
+  ) {
+    throw new Error(
+      "Invalid worker configuration: VAULT_TOKEN and VAULT_TRANSIT_KEY are required in production when ENVELOPE_PROVIDER=vault",
     );
   }
   if (
@@ -109,6 +153,8 @@ export function parseWorkerConfig(
   }
   return {
     ...result.data,
+    LEGACY_ENCRYPTION_KEY_CONFIGURED:
+      result.data.SECRET_ENCRYPTION_KEY !== undefined,
     SECRET_ENCRYPTION_KEY:
       result.data.SECRET_ENCRYPTION_KEY ?? localEncryptionKey,
   };

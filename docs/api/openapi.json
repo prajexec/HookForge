@@ -223,6 +223,27 @@
         }
       }
     },
+    "/metrics/prometheus": {
+      "get": {
+        "summary": "Read Prometheus text-format metrics",
+        "operationId": "getPrometheusMetrics",
+        "tags": ["Operations"],
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/openapi.json": {
       "get": {
         "summary": "Download the API contract",

@@ -68,6 +68,10 @@ FROM builder AS migrate
 ENV NODE_ENV=development
 CMD ["npm", "run", "db:migrate"]
 
+FROM builder AS retention
+ENV NODE_ENV=development
+CMD ["npm", "run", "db:retention"]
+
 FROM nginx:1.27-alpine AS web
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=builder /app/apps/web/dist /usr/share/nginx/html

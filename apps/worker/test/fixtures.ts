@@ -23,6 +23,7 @@ export function deliveryJob(overrides: Partial<DeliveryJob> = {}): DeliveryJob {
   return {
     id: randomUUID(),
     eventId: randomUUID(),
+    projectId: randomUUID(),
     eventType: "payment.created",
     payload: { paymentId: "pay_123" },
     endpointId: randomUUID(),
@@ -33,6 +34,9 @@ export function deliveryJob(overrides: Partial<DeliveryJob> = {}): DeliveryJob {
     deliveryKind: "event",
     attemptNumber: 1,
     leaseToken: randomUUID(),
+    sourceRequestId: null,
+    traceparent: null,
+    tracestate: null,
     ...overrides,
   };
 }

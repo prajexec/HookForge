@@ -10,7 +10,8 @@ observability without requiring a heavyweight local stack.
 The repository currently contains the following working slices:
 
 - TypeScript strict-mode npm workspace for API, worker, web, and shared code.
-- Fastify API with `/health`, `/ready`, and `/metrics`.
+- Fastify API with `/health`, `/ready`, JSON `/metrics`, and Prometheus
+  `/metrics/prometheus` exposition.
 - Zod environment validation, Pino-backed Fastify logging, security headers, and
   restricted local CORS defaults.
 - PostgreSQL 16 and Redis 7 Alpine Compose services tuned for local ARM64 use.
@@ -23,7 +24,8 @@ The repository currently contains the following working slices:
 - Encrypted per-endpoint static headers, one-time secret display, and immutable
   delivery snapshots for URL, signing secret, headers, and routing decisions.
 - PostgreSQL-backed worker with leases, bounded HTTP delivery, HMAC signatures,
-  retry scheduling, attempt history, and abandoned-lease recovery.
+  retry scheduling, attempt history, abandoned-lease recovery, and shared
+  per-endpoint/project in-flight quotas.
 - Paginated delivery inspection, attempt-history detail, replay, bulk replay and
   cancellation, dead-letter metadata, alert routing, and lease reconciliation
   APIs.
@@ -31,9 +33,17 @@ The repository currently contains the following working slices:
   inspecting real outbound requests locally.
 - API-backed React dashboard for projects, endpoints, events, and deliveries.
 - ARM64-conscious multi-stage Docker images and Compose startup orchestration.
-- Bounded API rate limits, safe operational metrics, worker heartbeat health,
-  and a configurable k6 benchmark harness.
-- SSRF-aware endpoint URL validation and lifecycle actions.
+- Distributed Redis token bucket rate limits, safe operational metrics, worker
+  heartbeat health, and a configurable k6 benchmark harness.
+- Monthly RANGE-partitioned historical archives for events, deliveries, and
+  attempts, with an advisory-locked retention runner and Compose maintenance
+  service.
+- Optional HashiCorp Vault Transit envelope encryption with versioned wrapped
+  data keys, zero-downtime key rotation, and database audit events.
+- OpenTelemetry W3C trace context persisted through the PostgreSQL queue and
+  continued through worker delivery to receiver HTTP requests.
+- SSRF-aware endpoint URL validation and lifecycle actions, including worker
+  socket pinning against DNS rebinding.
 - Unit and route tests for health, authentication, tenant isolation, crypto,
   endpoint lifecycle, URL policy, and the OpenAPI contract.
 - Deterministic OpenAPI 3.1 generation at `/openapi.json`, with a checked-in
@@ -48,8 +58,8 @@ HookForge will remain a modular monolith with separate API and worker processes.
 PostgreSQL is the source of truth for projects, endpoints, events, deliveries,
 and attempts. The delivery queue will be PostgreSQL-backed and claimed with
 `FOR UPDATE SKIP LOCKED`, so event creation and initial delivery scheduling can
-share a transaction. Redis is reserved for short-lived coordination and rate
-limiting; it will not be the only location for important event data.
+share a transaction. Redis holds ephemeral shared rate-limit state;
+PostgreSQL remains the durable delivery queue.
 
 See [the architecture overview](docs/architecture/ARCHITECTURE.md),
 [the diagrams](docs/architecture/diagrams.md), and the decision records in
@@ -59,7 +69,7 @@ See [the architecture overview](docs/architecture/ARCHITECTURE.md),
 
 - Node.js 22 LTS-compatible runtime, TypeScript, Fastify, Zod, and Pino
 - PostgreSQL 16 with `pg` and SQL migrations
-- Redis 7 for ephemeral coordination
+- Redis 7 for distributed rate limiting and ephemeral coordination
 - React, Vite, and TypeScript for the dashboard
 - Vitest, ESLint, Prettier, Docker Compose, and GitHub Actions
 
@@ -80,7 +90,7 @@ npm install
 docker compose up -d
 ```
 
-Compose builds and starts the migration job, API, worker, mock receiver, and web dashboard.
+Compose builds and starts the migration job, API, worker, retention runner, mock receiver, and web dashboard.
 The dashboard is available at `http://localhost:5173`; the API is available at
 `http://localhost:3000`. The mock receiver is available at
 `http://localhost:8080`; PostgreSQL and Redis ports are intentionally private to
@@ -104,7 +114,47 @@ keeps native dependencies compatible with Linux ARM64.
 
 The local `.env.example` encryption key is intentionally a known development
 value. Replace it before sharing a development environment or deploying
-anywhere. Production startup requires `SECRET_ENCRYPTION_KEY` to be supplied.
+anywhere. For production, set `ENVELOPE_PROVIDER=vault`, Vault Transit
+credentials, and `VAULT_TRANSIT_KEY`; keep `SECRET_ENCRYPTION_KEY` available
+until legacy ciphertext has been re-encrypted. Legacy mode still requires
+`SECRET_ENCRYPTION_KEY` in production.
+
+The retention service runs `npm run db:retention` once per
+`RETENTION_INTERVAL_SECONDS`. It archives only terminal event graphs, keeps
+the live hot tables bounded by `ARCHIVE_AFTER_MONTHS`, and drops archive
+partitions older than `PURGE_AFTER_MONTHS`. Use `RETENTION_DRY_RUN=true` for a
+safe preview.
+
+To rotate the active Vault-wrapped data key without stopping API or workers:
+
+```bash
+npm run db:rotate-encryption-key
+```
+
+Old key versions remain in `retiring` state so queued deliveries can continue
+to decrypt while new endpoint secrets use the new version.
+
+## Rate limiting
+
+The default limiter uses an atomic Redis Lua token bucket and Redis server
+`TIME`. Registration and login share a bucket per trusted socket IP; event
+ingestion uses the authenticated user/project pair, with a socket-IP fallback
+for unauthorized attempts. `X-Forwarded-For` is not trusted.
+
+Defaults allow an initial burst of 10 auth requests or 120 event requests per
+scope. An empty bucket refills continuously to full capacity over 60 seconds
+without further consumption, rather than resetting at fixed window boundaries.
+All API replicas must use the same Redis database and `RATE_LIMIT_*` policies.
+Exhausted buckets return `429 RATE_LIMIT_EXCEEDED` with `Retry-After` in seconds
+until the next token; Redis failures return `503 RATE_LIMIT_UNAVAILABLE` with
+no local fallback.
+`/health`, `/ready`, and `/metrics` are not rate limited; readiness checks Redis.
+
+Compose uses Redis `noeviction` with persistence disabled. Redis restart or
+flush loses quotas, and quota continuity through restart or failover is not
+guaranteed. Accepted events and delivery work remain durable in PostgreSQL.
+See the [API contract](docs/api/API.md#rate-limits) and
+[operational guidance](docs/operations/RUNBOOK.md#rate-limits).
 
 ## Commands
 
@@ -121,6 +171,8 @@ npm run compose:logs
 npm run compose:ps
 npm run compose:build
 npm run compose:down
+npm run db:retention
+npm run db:rotate-encryption-key
 ```
 
 Run `docker system df` to inspect disk usage. Remove only this project's

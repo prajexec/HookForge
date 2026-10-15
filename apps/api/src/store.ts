@@ -215,6 +215,14 @@ export interface EncryptedSecretRecord {
   ciphertext: string;
   iv: string;
   authTag: string;
+  encryptionKeyVersion?: number;
+}
+
+export interface AuditContext {
+  actorType: "user" | "system";
+  actorId?: string;
+  requestId?: string;
+  traceId?: string;
 }
 
 export interface HookForgeStore {
@@ -253,6 +261,7 @@ export interface HookForgeStore {
     secret: EncryptedSecretRecord;
     staticHeaders: EncryptedHeaderMap;
     eventPatterns: string[];
+    audit?: AuditContext;
   }): Promise<EndpointRecord>;
   listEndpoints(
     ownerId: string,
@@ -274,6 +283,7 @@ export interface HookForgeStore {
       url?: string;
       staticHeaders?: EncryptedHeaderMap;
     },
+    audit?: AuditContext,
   ): Promise<EndpointRecord | null>;
   setEndpointStatus(
     ownerId: string,
@@ -286,6 +296,7 @@ export interface HookForgeStore {
     projectId: string,
     endpointId: string,
     secret: EncryptedSecretRecord,
+    audit?: AuditContext,
   ): Promise<EndpointRecord | null>;
   listEndpointSubscriptions(
     ownerId: string,
@@ -305,6 +316,9 @@ export interface HookForgeStore {
     payload: JsonValue;
     idempotencyKey?: string;
     requestHash: string;
+    sourceRequestId?: string;
+    traceparent?: string;
+    tracestate?: string;
   }): Promise<IngestEventResult>;
   listEvents(
     ownerId: string,
@@ -516,6 +530,41 @@ async function rollback(client: PoolClient): Promise<void> {
   } catch {
     // Preserve the original transaction error.
   }
+}
+
+async function recordAudit(
+  client: PoolClient,
+  input: {
+    action: string;
+    audit?: AuditContext;
+    projectId?: string;
+    endpointId?: string;
+    provider?: string;
+    encryptionKeyVersion?: number;
+    success?: boolean;
+    metadata?: Record<string, JsonValue>;
+  },
+): Promise<void> {
+  if (!input.audit) return;
+  await client.query(
+    `INSERT INTO audit_events
+       (action, actor_type, actor_id, project_id, endpoint_id,
+        request_id, trace_id, provider, encryption_key_version, success, metadata)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [
+      input.action,
+      input.audit.actorType,
+      input.audit.actorId ?? null,
+      input.projectId ?? null,
+      input.endpointId ?? null,
+      input.audit.requestId ?? null,
+      input.audit.traceId ?? null,
+      input.provider ?? null,
+      input.encryptionKeyVersion ?? null,
+      input.success ?? true,
+      input.metadata ?? {},
+    ],
+  );
 }
 
 export class PgStore implements HookForgeStore {
@@ -789,6 +838,9 @@ export class PgStore implements HookForgeStore {
     payload: JsonValue;
     idempotencyKey?: string;
     requestHash: string;
+    sourceRequestId?: string;
+    traceparent?: string;
+    tracestate?: string;
   }): Promise<IngestEventResult> {
     const client = await this.pool.connect();
     try {
@@ -836,10 +888,18 @@ export class PgStore implements HookForgeStore {
       }
 
       const event = await client.query<DatabaseRow>(
-        `INSERT INTO events (project_id, event_type, payload)
-         VALUES ($1, $2, $3)
+        `INSERT INTO events
+           (project_id, event_type, payload, source_request_id, traceparent, tracestate)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id, project_id, event_type, payload, created_at`,
-        [input.projectId, input.eventType, input.payload],
+        [
+          input.projectId,
+          input.eventType,
+          input.payload,
+          input.sourceRequestId ?? null,
+          input.traceparent ?? null,
+          input.tracestate ?? null,
+        ],
       );
       const eventRow = event.rows[0]!;
 
@@ -962,6 +1022,7 @@ export class PgStore implements HookForgeStore {
     secret: EncryptedSecretRecord;
     staticHeaders: EncryptedHeaderMap;
     eventPatterns: string[];
+    audit?: AuditContext;
   }): Promise<EndpointRecord> {
     const client = await this.pool.connect();
     try {
@@ -990,13 +1051,15 @@ export class PgStore implements HookForgeStore {
       );
       const row = endpoint.rows[0]!;
       await client.query(
-        `INSERT INTO endpoint_secrets (endpoint_id, version, ciphertext, iv, auth_tag)
-         VALUES ($1, 1, $2, $3, $4)`,
+        `INSERT INTO endpoint_secrets
+           (endpoint_id, version, ciphertext, iv, auth_tag, encryption_key_version)
+         VALUES ($1, 1, $2, $3, $4, $5)`,
         [
           row.id,
           input.secret.ciphertext,
           input.secret.iv,
           input.secret.authTag,
+          input.secret.encryptionKeyVersion ?? null,
         ],
       );
       for (const pattern of input.eventPatterns) {
@@ -1005,6 +1068,21 @@ export class PgStore implements HookForgeStore {
            VALUES ($1, $2)`,
           [row.id, pattern],
         );
+      }
+      if (input.audit) {
+        await recordAudit(client, {
+          action: "endpoint.secret.created",
+          audit: input.audit,
+          projectId: input.projectId,
+          endpointId: String(row.id),
+          provider: input.secret.encryptionKeyVersion ? "vault" : "legacy",
+          ...(input.secret.encryptionKeyVersion === undefined
+            ? {}
+            : { encryptionKeyVersion: input.secret.encryptionKeyVersion }),
+          metadata: {
+            staticHeaderCount: Object.keys(input.staticHeaders).length,
+          },
+        });
       }
       row.event_patterns = input.eventPatterns;
       await client.query("COMMIT");
@@ -1073,32 +1151,66 @@ export class PgStore implements HookForgeStore {
       url?: string;
       staticHeaders?: EncryptedHeaderMap;
     },
+    audit?: AuditContext,
   ): Promise<EndpointRecord | null> {
-    const result = await this.pool.query<DatabaseRow>(
-      `UPDATE endpoints e
-       SET name = COALESCE($4, e.name),
-           name_normalized = COALESCE($5, e.name_normalized),
-           url = COALESCE($6, e.url),
-           static_headers = COALESCE($7, e.static_headers),
-           updated_at = now()
-       FROM projects p
-       WHERE e.id = $1 AND e.project_id = $2 AND p.id = e.project_id
-         AND p.owner_id = $3
-       RETURNING e.id, e.project_id, e.name, e.url, e.status,
-                  e.current_secret_version, e.static_headers,
-                  e.last_successful_delivery_at, e.created_at, e.updated_at`,
-      [
-        endpointId,
-        projectId,
-        ownerId,
-        input.name ?? null,
-        input.nameNormalized ?? null,
-        input.url ?? null,
-        input.staticHeaders ?? null,
-      ],
-    );
-    if (!result.rows[0]) {
-      return null;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<DatabaseRow>(
+        `UPDATE endpoints e
+         SET name = COALESCE($4, e.name),
+             name_normalized = COALESCE($5, e.name_normalized),
+             url = COALESCE($6, e.url),
+             static_headers = COALESCE($7, e.static_headers),
+             updated_at = now()
+         FROM projects p
+         WHERE e.id = $1 AND e.project_id = $2 AND p.id = e.project_id
+           AND p.owner_id = $3
+         RETURNING e.id, e.project_id, e.name, e.url, e.status,
+                    e.current_secret_version, e.static_headers,
+                    e.last_successful_delivery_at, e.created_at, e.updated_at`,
+        [
+          endpointId,
+          projectId,
+          ownerId,
+          input.name ?? null,
+          input.nameNormalized ?? null,
+          input.url ?? null,
+          input.staticHeaders ?? null,
+        ],
+      );
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      if (input.staticHeaders && audit) {
+        await client.query(
+          `INSERT INTO audit_events
+             (action, actor_type, actor_id, project_id, endpoint_id,
+              request_id, trace_id, provider, success, metadata)
+           VALUES ('endpoint.static_headers.updated', $1, $2, $3, $4, $5, $6, $7, true, $8)`,
+          [
+            audit.actorType,
+            audit.actorId ?? null,
+            projectId,
+            endpointId,
+            audit.requestId ?? null,
+            audit.traceId ?? null,
+            Object.values(input.staticHeaders).some(
+              (header) => header.encryptionKeyVersion !== undefined,
+            )
+              ? "vault"
+              : "legacy",
+            { staticHeaderCount: Object.keys(input.staticHeaders).length },
+          ],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
     }
     return this.getEndpoint(ownerId, projectId, endpointId);
   }
@@ -1130,6 +1242,7 @@ export class PgStore implements HookForgeStore {
     projectId: string,
     endpointId: string,
     secret: EncryptedSecretRecord,
+    audit?: AuditContext,
   ): Promise<EndpointRecord | null> {
     const client = await this.pool.connect();
     try {
@@ -1166,9 +1279,17 @@ export class PgStore implements HookForgeStore {
         [endpointId],
       );
       await client.query(
-        `INSERT INTO endpoint_secrets (endpoint_id, version, ciphertext, iv, auth_tag)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [endpointId, nextVersion, secret.ciphertext, secret.iv, secret.authTag],
+        `INSERT INTO endpoint_secrets
+           (endpoint_id, version, ciphertext, iv, auth_tag, encryption_key_version)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          endpointId,
+          nextVersion,
+          secret.ciphertext,
+          secret.iv,
+          secret.authTag,
+          secret.encryptionKeyVersion ?? null,
+        ],
       );
       await client.query<DatabaseRow>(
         `UPDATE endpoints
@@ -1178,6 +1299,19 @@ export class PgStore implements HookForgeStore {
                     static_headers, last_successful_delivery_at, created_at, updated_at`,
         [endpointId, nextVersion],
       );
+      if (audit) {
+        await recordAudit(client, {
+          action: "endpoint.secret.rotated",
+          audit,
+          projectId,
+          endpointId,
+          provider: secret.encryptionKeyVersion ? "vault" : "legacy",
+          ...(secret.encryptionKeyVersion === undefined
+            ? {}
+            : { encryptionKeyVersion: secret.encryptionKeyVersion }),
+          metadata: { secretVersion: nextVersion },
+        });
+      }
       await client.query("COMMIT");
       return this.getEndpoint(ownerId, projectId, endpointId);
     } catch (error) {
@@ -1726,25 +1860,53 @@ export class PgStore implements HookForgeStore {
     ownerId: string,
     projectId: string,
   ): Promise<number> {
-    const result = await this.pool.query(
-      `UPDATE deliveries d
-        SET status = CASE WHEN d.cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'pending' END,
-           next_attempt_at = LEAST(d.next_attempt_at, now()),
-           lease_expires_at = NULL,
-           lease_token = NULL,
-           cancelled_at = CASE WHEN d.cancel_requested_at IS NOT NULL THEN COALESCE(d.cancelled_at, now()) ELSE d.cancelled_at END,
-           completed_at = CASE WHEN d.cancel_requested_at IS NOT NULL THEN COALESCE(d.completed_at, now()) ELSE d.completed_at END,
-           updated_at = now()
-       FROM events e
-       JOIN projects p ON p.id = e.project_id
-       WHERE d.event_id = e.id
-         AND p.id = $1
-         AND p.owner_id = $2
-         AND d.status = 'in_flight'
-         AND d.lease_expires_at <= now()
-       RETURNING d.id`,
-      [projectId, ownerId],
-    );
-    return result.rowCount ?? 0;
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const project = await client.query(
+        `SELECT id FROM projects WHERE id = $1 AND owner_id = $2`,
+        [projectId, ownerId],
+      );
+      if (project.rowCount === 0) {
+        await client.query("COMMIT");
+        return 0;
+      }
+      await client.query(
+        `INSERT INTO delivery_project_quota_locks (project_id)
+         VALUES ($1) ON CONFLICT DO NOTHING`,
+        [projectId],
+      );
+      await client.query(
+        `SELECT project_id
+           FROM delivery_project_quota_locks
+          WHERE project_id = $1
+          FOR UPDATE`,
+        [projectId],
+      );
+      const result = await client.query(
+        `UPDATE deliveries d
+          SET status = CASE WHEN d.cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'pending' END,
+              next_attempt_at = LEAST(d.next_attempt_at, now()),
+              lease_expires_at = NULL,
+              lease_token = NULL,
+              cancelled_at = CASE WHEN d.cancel_requested_at IS NOT NULL THEN COALESCE(d.cancelled_at, now()) ELSE d.cancelled_at END,
+              completed_at = CASE WHEN d.cancel_requested_at IS NOT NULL THEN COALESCE(d.completed_at, now()) ELSE d.completed_at END,
+              updated_at = now()
+         FROM events e
+         WHERE d.event_id = e.id
+           AND e.project_id = $1
+           AND d.status = 'in_flight'
+           AND d.lease_expires_at <= now()
+         RETURNING d.id`,
+        [projectId],
+      );
+      await client.query("COMMIT");
+      return result.rowCount ?? 0;
+    } catch (error) {
+      await rollback(client);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }

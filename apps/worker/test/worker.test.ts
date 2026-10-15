@@ -17,11 +17,21 @@ class FakeDeliveryStore implements DeliveryStore {
     activeJobs: number;
   }> = [];
   public stoppedWorkerId: string | null = null;
+  public claimInputs: Array<{
+    leaseSeconds: number;
+    maxInFlightPerEndpoint: number;
+    maxInFlightPerProject: number;
+  }> = [];
   private claimed = false;
 
   public constructor(private readonly job: DeliveryJob) {}
 
-  public async claimDueDelivery(): Promise<DeliveryJob | null> {
+  public async claimDueDelivery(input: {
+    leaseSeconds: number;
+    maxInFlightPerEndpoint: number;
+    maxInFlightPerProject: number;
+  }): Promise<DeliveryJob | null> {
+    this.claimInputs.push(input);
     if (this.claimed) return null;
     this.claimed = true;
     return this.job;
@@ -53,6 +63,8 @@ function config(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     SECRET_ENCRYPTION_KEY: encryptionKey,
     ALLOW_PRIVATE_ENDPOINTS: false,
     WORKER_CONCURRENCY: 1,
+    WORKER_MAX_IN_FLIGHT_PER_ENDPOINT: 1,
+    WORKER_MAX_IN_FLIGHT_PER_PROJECT: 5,
     WORKER_POLL_INTERVAL_MS: 25,
     WORKER_LEASE_SECONDS: 60,
     WORKER_REQUEST_TIMEOUT_MS: 1_000,
@@ -74,10 +86,15 @@ describe("delivery worker", () => {
       store,
       config: config(),
       random: () => 0.5,
-      fetchImpl: async () => new Response("temporary", { status: 503 }),
+      requestImpl: async () => new Response("temporary", { status: 503 }),
     });
 
     await expect(worker.runOnce()).resolves.toBe(true);
+    expect(store.claimInputs[0]).toEqual({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 1,
+      maxInFlightPerProject: 5,
+    });
     expect(store.attempts).toHaveLength(1);
     expect(store.attempts[0]).toMatchObject({
       outcome: "retry",
@@ -91,7 +108,7 @@ describe("delivery worker", () => {
     const worker = new DeliveryWorker({
       store,
       config: config(),
-      fetchImpl: async () => new Response("temporary", { status: 503 }),
+      requestImpl: async () => new Response("temporary", { status: 503 }),
     });
 
     await worker.runOnce();
@@ -108,7 +125,7 @@ describe("delivery worker", () => {
     const worker = new DeliveryWorker({
       store,
       config: config(),
-      fetchImpl: async () => new Response("ok", { status: 200 }),
+      requestImpl: async () => new Response("ok", { status: 200 }),
       sleep: async () => worker.stop(),
     });
 

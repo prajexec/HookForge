@@ -98,18 +98,21 @@ export interface EncryptedSecret {
   ciphertext: string;
   iv: string;
   authTag: string;
+  encryptionKeyVersion?: number;
 }
 
-export function encryptSecret(
+export function encryptSecretWithKey(
   secret: string,
-  encodedKey: string,
+  key: Buffer,
 ): EncryptedSecret {
+  if (key.length !== 32) {
+    throw badRequest(
+      "INVALID_ENCRYPTION_KEY",
+      "Encryption key must be 32 bytes",
+    );
+  }
   const iv = randomBytes(12);
-  const cipher = createCipheriv(
-    ENCRYPTION_ALGORITHM,
-    encryptionKey(encodedKey),
-    iv,
-  );
+  const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   const ciphertext = Buffer.concat([
     cipher.update(secret, "utf8"),
     cipher.final(),
@@ -122,13 +125,19 @@ export function encryptSecret(
   };
 }
 
-export function decryptSecret(
+export function decryptSecretWithKey(
   encrypted: EncryptedSecret,
-  encodedKey: string,
+  key: Buffer,
 ): string {
+  if (key.length !== 32) {
+    throw badRequest(
+      "INVALID_ENCRYPTION_KEY",
+      "Encryption key must be 32 bytes",
+    );
+  }
   const decipher = createDecipheriv(
     ENCRYPTION_ALGORITHM,
-    encryptionKey(encodedKey),
+    key,
     Buffer.from(encrypted.iv, "base64url"),
   );
   decipher.setAuthTag(Buffer.from(encrypted.authTag, "base64url"));
@@ -137,4 +146,18 @@ export function decryptSecret(
     decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
     decipher.final(),
   ]).toString("utf8");
+}
+
+export function encryptSecret(
+  secret: string,
+  encodedKey: string,
+): EncryptedSecret {
+  return encryptSecretWithKey(secret, encryptionKey(encodedKey));
+}
+
+export function decryptSecret(
+  encrypted: EncryptedSecret,
+  encodedKey: string,
+): string {
+  return decryptSecretWithKey(encrypted, encryptionKey(encodedKey));
 }

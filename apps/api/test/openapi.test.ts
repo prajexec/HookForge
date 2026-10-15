@@ -6,6 +6,7 @@ const expectedOperations: Record<string, string[]> = {
   "/health": ["get"],
   "/ready": ["get"],
   "/metrics": ["get"],
+  "/metrics/prometheus": ["get"],
   "/openapi.json": ["get"],
   "/api/v1/auth/register": ["post"],
   "/api/v1/auth/login": ["post"],

@@ -6,8 +6,10 @@ import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import { badRequest, conflict, notFound } from "../errors.js";
 import { encryptSecret, generateSigningSecret } from "../security/crypto.js";
+import type { SecretEncryption } from "../security/envelope.js";
 import type { EndpointRecord, HookForgeStore } from "../store.js";
 import { authenticate } from "./auth.js";
+import { activeTraceIds } from "../telemetry.js";
 
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
 const endpointParamsSchema = projectParamsSchema.extend({
@@ -90,11 +92,12 @@ async function receiverRequest(
 interface RouteOptions {
   config: AppConfig;
   store: HookForgeStore;
+  encryption?: SecretEncryption;
 }
 
 export async function registerSandboxRoutes(
   app: FastifyInstance,
-  { config, store }: RouteOptions,
+  { config, store, encryption }: RouteOptions,
 ): Promise<void> {
   app.post(
     "/api/v1/projects/:projectId/sandbox/endpoints",
@@ -115,15 +118,24 @@ export async function registerSandboxRoutes(
       );
       const publicBase = config.SANDBOX_RECEIVER_PUBLIC_URL.replace(/\/$/, "");
       const signingSecret = generateSigningSecret();
+      const traceId = activeTraceIds().traceId;
       const endpoint = await store.createEndpoint({
         ownerId: auth.user.id,
         projectId: params.projectId,
         name: input.name,
         nameNormalized: input.name.toLocaleLowerCase(),
         url: `${internalBase}/hooks/${token}`,
-        secret: encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
+        secret: encryption
+          ? await encryption.encrypt(signingSecret)
+          : encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
         staticHeaders: {},
         eventPatterns: ["*"],
+        audit: {
+          actorType: "user",
+          actorId: auth.user.id,
+          requestId: request.id,
+          ...(traceId ? { traceId } : {}),
+        },
       });
       return reply.code(201).send({
         endpoint: endpointResponse(endpoint),

@@ -103,7 +103,7 @@ export async function registerAuthRoutes(
   { config, store, rateLimiter }: RouteOptions,
 ): Promise<void> {
   app.post("/api/v1/auth/register", async (request, reply) => {
-    enforceAuthRateLimit(rateLimiter, config, request.ip);
+    await enforceAuthRateLimit(rateLimiter, config, request.ip);
     const credentials = parseCredentials(request.body);
     const email = normalizeEmail(credentials.email);
     const user = await store.createUser({
@@ -121,7 +121,7 @@ export async function registerAuthRoutes(
   });
 
   app.post("/api/v1/auth/login", async (request, reply) => {
-    enforceAuthRateLimit(rateLimiter, config, request.ip);
+    await enforceAuthRateLimit(rateLimiter, config, request.ip);
     const credentials = parseCredentials(request.body);
     const user = await store.findUserByEmail(normalizeEmail(credentials.email));
     if (
@@ -151,13 +151,13 @@ export async function registerAuthRoutes(
   });
 }
 
-function enforceAuthRateLimit(
+async function enforceAuthRateLimit(
   rateLimiter: RateLimiter | undefined,
   config: AppConfig,
   ip: string,
-): void {
+): Promise<void> {
   if (!rateLimiter) return;
-  enforceRateLimit(rateLimiter, `auth:${ip || "unknown"}`, {
+  await enforceRateLimit(rateLimiter, `auth:${ip || "unknown"}`, {
     maxRequests: config.RATE_LIMIT_AUTH_MAX_REQUESTS,
     windowSeconds: config.RATE_LIMIT_AUTH_WINDOW_SECONDS,
   });

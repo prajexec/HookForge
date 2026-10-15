@@ -39,6 +39,12 @@ describe("environment configuration", () => {
     });
   });
 
+  it("accepts empty optional Vault fields in local Compose defaults", () => {
+    expect(
+      parseConfig({ NODE_ENV: "test", VAULT_NAMESPACE: "", VAULT_TOKEN: "" }),
+    ).toMatchObject({ ENVELOPE_PROVIDER: "legacy" });
+  });
+
   it("rejects invalid ports", () => {
     expect(() => parseConfig({ PORT: "70000" })).toThrow(
       "Invalid environment configuration",

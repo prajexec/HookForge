@@ -512,6 +512,21 @@ const paths: Record<string, Record<string, OperationObject>> = {
       },
     },
   },
+  "/metrics/prometheus": {
+    get: {
+      summary: "Read Prometheus text-format metrics",
+      operationId: "getPrometheusMetrics",
+      tags: ["Operations"],
+      responses: {
+        "200": {
+          description: "Prometheus exposition",
+          content: {
+            "text/plain": { schema: { type: "string" } },
+          },
+        },
+      },
+    },
+  },
   "/openapi.json": {
     get: {
       summary: "Download the API contract",

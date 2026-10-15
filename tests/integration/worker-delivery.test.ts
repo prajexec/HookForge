@@ -1,7 +1,15 @@
 import { createCipheriv, randomBytes, randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 
 import { parseWorkerConfig } from "../../apps/worker/src/config.js";
 import {
@@ -15,6 +23,7 @@ const store = new PgDeliveryStore(config.DATABASE_URL, pool);
 const userId = randomUUID();
 const projectId = randomUUID();
 const endpointId = randomUUID();
+const secondEndpointId = randomUUID();
 const createdDeliveryIds: string[] = [];
 const encryptionKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
@@ -52,15 +61,35 @@ beforeAll(async () => {
      VALUES ($1, $2, 'Worker endpoint', $3, 'https://example.com/worker', 'active')`,
     [endpointId, projectId, `worker-${endpointId}`],
   );
+  await pool.query(
+    `INSERT INTO endpoints (id, project_id, name, name_normalized, url, status)
+     VALUES ($1, $2, 'Second worker endpoint', $3, 'https://example.com/worker-2', 'active')`,
+    [secondEndpointId, projectId, `worker-${secondEndpointId}`],
+  );
   const secret = encryptedSecret();
   await pool.query(
     `INSERT INTO endpoint_secrets (endpoint_id, version, ciphertext, iv, auth_tag)
      VALUES ($1, 1, $2, $3, $4)`,
     [endpointId, secret.ciphertext, secret.iv, secret.authTag],
   );
+  const secondSecret = encryptedSecret();
+  await pool.query(
+    `INSERT INTO endpoint_secrets (endpoint_id, version, ciphertext, iv, auth_tag)
+     VALUES ($1, 1, $2, $3, $4)`,
+    [
+      secondEndpointId,
+      secondSecret.ciphertext,
+      secondSecret.iv,
+      secondSecret.authTag,
+    ],
+  );
 });
 
-beforeEach(async () => {
+async function createDelivery(targetEndpointId = endpointId): Promise<string> {
+  const endpointUrl =
+    targetEndpointId === endpointId
+      ? "https://example.com/worker"
+      : "https://example.com/worker-2";
   const event = await pool.query<{ id: string }>(
     `INSERT INTO events (project_id, event_type, payload)
      VALUES ($1, 'worker.integration', '{"ok":true}')
@@ -70,11 +99,27 @@ beforeEach(async () => {
   const delivery = await pool.query<{ id: string }>(
     `INSERT INTO deliveries
        (event_id, endpoint_id, endpoint_url, endpoint_secret_version)
-     VALUES ($1, $2, 'https://example.com/worker', 1)
+     VALUES (
+       $1,
+       $2,
+       $3,
+       1
+     )
      RETURNING id`,
-    [event.rows[0]!.id, endpointId],
+    [event.rows[0]!.id, targetEndpointId, endpointUrl],
   );
   createdDeliveryIds.push(delivery.rows[0]!.id);
+  return delivery.rows[0]!.id;
+}
+
+beforeEach(async () => {
+  await createDelivery();
+});
+
+afterEach(async () => {
+  await pool.query("DELETE FROM deliveries WHERE id = ANY($1::uuid[])", [
+    createdDeliveryIds,
+  ]);
 });
 
 afterAll(async () => {
@@ -84,7 +129,11 @@ afterAll(async () => {
   await pool.query("DELETE FROM endpoint_secrets WHERE endpoint_id = $1", [
     endpointId,
   ]);
+  await pool.query("DELETE FROM endpoint_secrets WHERE endpoint_id = $1", [
+    secondEndpointId,
+  ]);
   await pool.query("DELETE FROM endpoints WHERE id = $1", [endpointId]);
+  await pool.query("DELETE FROM endpoints WHERE id = $1", [secondEndpointId]);
   await pool.query("DELETE FROM events WHERE project_id = $1", [projectId]);
   await pool.query("DELETE FROM projects WHERE id = $1", [projectId]);
   await pool.query("DELETE FROM users WHERE id = $1", [userId]);
@@ -124,7 +173,11 @@ describe("PostgreSQL worker leasing", () => {
   });
 
   it("claims a due delivery and records the complete attempt transaction", async () => {
-    const job = await store.claimDueDelivery(60);
+    const job = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 5,
+      maxInFlightPerProject: 5,
+    });
     expect(job).not.toBeNull();
     expect(job).toMatchObject<Partial<DeliveryJob>>({
       endpointId,
@@ -161,15 +214,127 @@ describe("PostgreSQL worker leasing", () => {
     expect(attempts.rows[0]).toEqual({ outcome: "success", attempt_number: 1 });
   });
 
+  it("caps concurrent claims for one endpoint across worker connections", async () => {
+    await createDelivery();
+    await createDelivery();
+    await createDelivery();
+
+    const claims = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        store.claimDueDelivery({
+          leaseSeconds: 60,
+          maxInFlightPerEndpoint: 2,
+          maxInFlightPerProject: 10,
+        }),
+      ),
+    );
+    expect(claims.filter((job) => job !== null)).toHaveLength(2);
+
+    const inFlight = await pool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM deliveries WHERE endpoint_id = $1 AND status = 'in_flight'",
+      [endpointId],
+    );
+    expect(Number(inFlight.rows[0]?.count)).toBe(2);
+  });
+
+  it("caps concurrent claims for a project without blocking another endpoint", async () => {
+    await createDelivery();
+    await createDelivery(secondEndpointId);
+    await createDelivery(secondEndpointId);
+
+    const claims = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        store.claimDueDelivery({
+          leaseSeconds: 60,
+          maxInFlightPerEndpoint: 10,
+          maxInFlightPerProject: 2,
+        }),
+      ),
+    );
+    expect(claims.filter((job) => job !== null)).toHaveLength(2);
+
+    const inFlight = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+         FROM deliveries d
+         JOIN events e ON e.id = d.event_id
+        WHERE e.project_id = $1 AND d.status = 'in_flight'`,
+      [projectId],
+    );
+    expect(Number(inFlight.rows[0]?.count)).toBe(2);
+  });
+
+  it("skips a saturated endpoint and claims an eligible endpoint", async () => {
+    const first = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 1,
+      maxInFlightPerProject: 10,
+    });
+    expect(first?.endpointId).toBe(endpointId);
+
+    const blocked = await createDelivery();
+    const eligible = await createDelivery(secondEndpointId);
+    await pool.query(
+      `UPDATE deliveries
+          SET next_attempt_at = CASE WHEN id = $1 THEN now() - interval '1 second' ELSE now() END
+        WHERE id IN ($1, $2)`,
+      [blocked, eligible],
+    );
+
+    const next = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 1,
+      maxInFlightPerProject: 10,
+    });
+    expect(next?.id).toBe(eligible);
+  });
+
+  it("releases endpoint capacity when an attempt is recorded", async () => {
+    const first = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 1,
+      maxInFlightPerProject: 10,
+    });
+    expect(first).not.toBeNull();
+    const requestAt = new Date();
+    await store.recordAttempt({
+      job: first!,
+      requestAt,
+      responseAt: requestAt,
+      responseDurationMs: 0,
+      httpStatusCode: 200,
+      responseExcerpt: "ok",
+      errorClassification: "http_success",
+      lastError: null,
+      outcome: "success",
+      nextAttemptAt: null,
+    });
+
+    const nextId = await createDelivery();
+    const next = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 1,
+      maxInFlightPerProject: 10,
+    });
+    expect(next?.id).toBe(nextId);
+  });
+
   it("recovers an expired lease and increments the attempt number", async () => {
-    const first = await store.claimDueDelivery(60);
+    const first = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 5,
+      maxInFlightPerProject: 5,
+    });
     expect(first).not.toBeNull();
     await pool.query(
       "UPDATE deliveries SET lease_expires_at = now() - interval '1 second' WHERE id = $1",
       [first!.id],
     );
 
-    const recovered = await store.claimDueDelivery(60);
+    const recovered = await store.claimDueDelivery({
+      leaseSeconds: 60,
+      maxInFlightPerEndpoint: 5,
+      maxInFlightPerProject: 5,
+    });
     expect(recovered).toMatchObject({
       id: first!.id,
       attemptNumber: 2,

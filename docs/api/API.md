@@ -53,13 +53,22 @@ Returns a small JSON snapshot containing HTTP request counters, process memory
 and uptime, event-loop lag, request duration aggregates, response status counts,
 sanitized error-code counts, queue backlog/status counts, delivery latency
 aggregates, and worker heartbeat/concurrency state. It contains no endpoint
-URLs, payloads, or credentials. A Prometheus exposition endpoint can be added
-if measured needs justify it.
+URLs, payloads, or credentials.
+
+### Prometheus scraping
+
+`GET /metrics` with an `Accept: text/plain` header, or `GET /metrics/prometheus`,
+returns process/runtime counters in Prometheus text exposition format with a
+`text/plain; version=0.0.4` content type. Queue and worker gauges are
+refreshed from PostgreSQL when available; the scrape remains useful if the
+database is temporarily unavailable. Worker instances expose their own
+internal-only `GET /metrics` listener on `WORKER_METRICS_PORT` (default 9464).
 
 ## Request IDs and errors
 
 Fastify accepts an incoming `X-Request-Id` and generates one when absent. The
-ID is returned in structured application errors and is available in logs. The
+ID is returned on every response and in structured application errors and is
+available in logs. The
 domain error envelope will remain:
 
 ```json
@@ -76,6 +85,44 @@ The complete machine-readable contract is available at `/openapi.json`. It
 documents bearer authentication, request and response schemas, pagination,
 idempotency behavior, rate-limit responses, and the safe error envelope. No
 unimplemented route is presented as available.
+
+When OpenTelemetry is enabled, event ingestion stores W3C `traceparent` and
+`tracestate` alongside the event. The worker restores that context after the
+PostgreSQL queue claim and propagates a child trace to the receiver request.
+
+## Rate limits
+
+The default rate limiter is a distributed Redis token bucket. Each bucket starts
+with `maxRequests` tokens, consumes one token per admitted request, and refills
+continuously at `maxRequests / windowSeconds` tokens per second, capped at
+`maxRequests`. An empty bucket refills completely over `windowSeconds` without
+further consumption. This is an initial burst plus a sustained refill rate, not
+a fixed-window reset or a strict request count in every rolling window.
+
+| Routes                                                     | Bucket scope                                                                                | Default capacity | Default refill                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------- | ----------------------------------------------- |
+| `POST /api/v1/auth/register` and `POST /api/v1/auth/login` | One shared auth bucket per trusted socket IP                                                | 10 tokens        | 10 tokens over 60 seconds (one every 6 seconds) |
+| `POST /api/v1/projects/{projectId}/events`                 | Authenticated user + project; unauthorized attempts fall back to a separate socket-IP scope | 120 tokens       | 120 tokens over 60 seconds (2 per second)       |
+
+The client IP comes from the socket, not `X-Forwarded-For`. Requests arriving
+through a proxy therefore share its socket IP for IP-scoped limits. All API
+replicas must use the same Redis database and matching `RATE_LIMIT_*` policies
+to share quotas. Consumption and refill are atomic in Redis Lua and use Redis
+server `TIME`, avoiding API-replica clock differences.
+
+| Condition                                    | Response                     | Client guidance                                                                    |
+| -------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------- |
+| No token available                           | `429 RATE_LIMIT_EXCEEDED`    | `Retry-After` gives seconds until the next token, not until a whole window resets. |
+| Redis unavailable, command error, or timeout | `503 RATE_LIMIT_UNAVAILABLE` | The quota could not be checked; this is not a quota-exhaustion response.           |
+
+Both failures use the [safe error envelope](#request-ids-and-errors), including
+`requestId`, without exposing Redis connection details or internal errors. The
+limiter fails closed with no process-local fallback. `/health`, `/ready`, and
+`/metrics` are not rate limited; `/ready` still checks Redis availability.
+
+Quota state is ephemeral: Redis restart or flush loses quotas in the current
+Compose setup, and restart/failover continuity is not guaranteed. See the
+[runbook](../operations/RUNBOOK.md#rate-limits) for configuration and operations.
 
 ## Authentication
 
@@ -98,9 +145,10 @@ token.
 
 Accepts `{ "email": "dev@example.com", "password": "..." }` and returns
 `201` with a user, bearer token, and expiration. Duplicate emails return `409`.
-Sensitive auth routes use a bounded per-client fixed-window limiter by default:
-10 requests per 60 seconds. A rejected request returns `429`,
-`RATE_LIMIT_EXCEEDED`, and `Retry-After`.
+Registration and login share the [auth token bucket](#rate-limits) for the
+trusted socket IP: a default burst of 10 requests, refilling continuously over
+60 seconds. Rate-limit failures return `429 RATE_LIMIT_EXCEEDED` or
+`503 RATE_LIMIT_UNAVAILABLE` as described above.
 
 ### `POST /api/v1/auth/login`
 
@@ -193,10 +241,11 @@ idempotency key when present, snapshots active endpoint URLs and secret versions
 and inserts delivery rows before committing. A committed accepted event
 therefore cannot be acknowledged without its durable initial delivery work.
 
-Event ingestion uses a bounded per-user/project fixed-window limiter by default:
-120 requests per 60 seconds. Unauthenticated attempts are keyed by client IP
-until authentication succeeds. The limiter is process-local and does not claim
-cross-instance coordination; scale-out deployments need shared coordination.
+Event ingestion uses the shared Redis [event token bucket](#rate-limits) for
+the authenticated user/project pair: a default burst of 120 requests, refilling
+continuously over 60 seconds. Unauthorized attempts use the socket-IP fallback
+scope. Quota exhaustion returns `429 RATE_LIMIT_EXCEEDED`; Redis failures return
+`503 RATE_LIMIT_UNAVAILABLE`.
 
 The standalone worker claims those pending rows asynchronously. Delivery
 inspection and replay routes are described below.
