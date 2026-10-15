@@ -18,6 +18,15 @@ export interface DeliveryJob {
     iv: string;
     authTag: string;
   };
+  encryptedStaticHeaders: Record<
+    string,
+    {
+      ciphertext: string;
+      iv: string;
+      authTag: string;
+    }
+  >;
+  deliveryKind: "event" | "dead_letter_alert";
   attemptNumber: number;
   leaseToken: string;
 }
@@ -80,6 +89,12 @@ function mapJob(row: DatabaseRow): DeliveryJob {
       iv: String(row.iv),
       authTag: String(row.auth_tag),
     },
+    encryptedStaticHeaders:
+      row.endpoint_static_headers &&
+      typeof row.endpoint_static_headers === "object"
+        ? (row.endpoint_static_headers as DeliveryJob["encryptedStaticHeaders"])
+        : {},
+    deliveryKind: row.delivery_kind as DeliveryJob["deliveryKind"],
     attemptNumber: Number(row.attempt_number),
     leaseToken: String(row.lease_token),
   };
@@ -108,8 +123,11 @@ export class PgDeliveryStore implements DeliveryStore {
       await client.query("BEGIN");
       await client.query(
         `UPDATE deliveries
-         SET status = 'pending', lease_expires_at = NULL, lease_token = NULL,
-             updated_at = now()
+          SET status = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE 'pending' END,
+              lease_expires_at = NULL, lease_token = NULL,
+              cancelled_at = CASE WHEN cancel_requested_at IS NOT NULL THEN COALESCE(cancelled_at, now()) ELSE cancelled_at END,
+              completed_at = CASE WHEN cancel_requested_at IS NOT NULL THEN COALESCE(completed_at, now()) ELSE completed_at END,
+              updated_at = now()
          WHERE status = 'in_flight' AND lease_expires_at <= now()`,
       );
 
@@ -145,8 +163,10 @@ export class PgDeliveryStore implements DeliveryStore {
            d.endpoint_id,
            d.endpoint_url,
            d.endpoint_secret_version,
-           d.attempt_count AS attempt_number,
-           d.lease_token,
+            d.attempt_count AS attempt_number,
+            d.lease_token,
+            d.endpoint_static_headers,
+            d.delivery_kind,
            e.event_type,
            e.payload,
            s.ciphertext,
@@ -185,16 +205,22 @@ export class PgDeliveryStore implements DeliveryStore {
             : "failed";
       const updated = await client.query<DatabaseRow>(
         `UPDATE deliveries
-         SET status = $2,
+         SET status = CASE WHEN cancel_requested_at IS NOT NULL THEN 'cancelled' ELSE $2 END,
              next_attempt_at = COALESCE($3, next_attempt_at),
              lease_expires_at = NULL,
              lease_token = NULL,
              last_http_status_code = $4,
              last_error = $5,
              updated_at = now(),
-             completed_at = CASE WHEN $2 IN ('delivered', 'failed') THEN now() ELSE NULL END
+             cancelled_at = CASE WHEN cancel_requested_at IS NOT NULL THEN COALESCE(cancelled_at, now()) ELSE cancelled_at END,
+             dead_lettered_at = CASE WHEN $2 = 'failed' AND cancel_requested_at IS NULL THEN COALESCE(dead_lettered_at, now()) ELSE dead_lettered_at END,
+             dead_letter_reason = CASE WHEN $2 = 'failed' AND cancel_requested_at IS NULL THEN COALESCE(dead_letter_reason, $7) ELSE dead_letter_reason END,
+             completed_at = CASE
+               WHEN cancel_requested_at IS NOT NULL OR $2 IN ('delivered', 'failed') THEN now()
+               ELSE NULL
+             END
          WHERE id = $1 AND status = 'in_flight' AND lease_token = $6::uuid
-         RETURNING id`,
+         RETURNING id, event_id, delivery_kind, status, attempt_count`,
         [
           input.job.id,
           status,
@@ -202,6 +228,7 @@ export class PgDeliveryStore implements DeliveryStore {
           input.httpStatusCode,
           input.lastError,
           input.job.leaseToken,
+          input.lastError ?? input.errorClassification,
         ],
       );
       if (updated.rowCount === 0) {
@@ -225,6 +252,63 @@ export class PgDeliveryStore implements DeliveryStore {
           input.outcome,
         ],
       );
+      const updatedRow = updated.rows[0]!;
+      if (
+        updatedRow.status === "failed" &&
+        updatedRow.delivery_kind === "event"
+      ) {
+        const alert = await client.query<DatabaseRow>(
+          `SELECT e.project_id, e.event_type, d.endpoint_id,
+                  d.attempt_count, d.last_http_status_code,
+                  a.endpoint_id AS alert_endpoint_id,
+                  alert_ep.url AS alert_endpoint_url,
+                  alert_ep.current_secret_version AS alert_secret_version,
+                  alert_ep.static_headers AS alert_static_headers
+           FROM deliveries d
+           JOIN events e ON e.id = d.event_id
+           JOIN project_dead_letter_alerts a ON a.project_id = e.project_id
+           JOIN endpoints alert_ep ON alert_ep.id = a.endpoint_id
+           WHERE d.id = $1 AND alert_ep.status = 'active'`,
+          [input.job.id],
+        );
+        const alertRow = alert.rows[0];
+        if (alertRow) {
+          const internalEvent = await client.query<DatabaseRow>(
+            `INSERT INTO events (project_id, event_type, payload, is_internal)
+             VALUES ($1, 'hookforge.delivery.dead_lettered', $2, true)
+             RETURNING id`,
+            [
+              alertRow.project_id,
+              {
+                deliveryId: input.job.id,
+                eventId: input.job.eventId,
+                eventType: input.job.eventType,
+                endpointId: alertRow.endpoint_id,
+                attemptCount: Number(alertRow.attempt_count),
+                httpStatusCode: alertRow.last_http_status_code
+                  ? Number(alertRow.last_http_status_code)
+                  : null,
+                reason: input.lastError ?? input.errorClassification,
+              },
+            ],
+          );
+          await client.query(
+            `INSERT INTO deliveries
+               (event_id, endpoint_id, endpoint_url, endpoint_secret_version,
+                endpoint_static_headers, delivery_kind, alert_source_delivery_id)
+             VALUES ($1, $2, $3, $4, $5, 'dead_letter_alert', $6)
+              ON CONFLICT (alert_source_delivery_id) WHERE alert_source_delivery_id IS NOT NULL DO NOTHING`,
+            [
+              internalEvent.rows[0]!.id,
+              alertRow.alert_endpoint_id,
+              alertRow.alert_endpoint_url,
+              alertRow.alert_secret_version,
+              alertRow.alert_static_headers,
+              input.job.id,
+            ],
+          );
+        }
+      }
       await client.query("COMMIT");
     } catch (error) {
       await rollback(client);

@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import { errorMessage, projectPath, type ApiClient } from "./api.js";
 import { EndpointsPanel } from "./EndpointsPanel.js";
+import { SandboxPanel } from "./SandboxPanel.js";
 import type {
   Delivery,
   DeliveryDetail,
@@ -286,6 +287,7 @@ function ProjectWorkspace({
       </section>
       <aside className="side-column">
         <EndpointsPanel api={api} projectId={project.id} onChanged={changed} />
+        <SandboxPanel api={api} projectId={project.id} onChanged={changed} />
         <ReceiverNote />
       </aside>
     </div>
@@ -619,6 +621,8 @@ function DeliveriesPanel({
   const [selected, setSelected] = useState<DeliveryDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionPending, setActionPending] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -627,6 +631,7 @@ function DeliveriesPanel({
     setSelected(null);
     setCursor(null);
     setDeliveries([]);
+    setSelectedIds([]);
     const query = status ? `&status=${status}` : "";
     void api
       .request<DeliveriesResponse>(
@@ -644,7 +649,7 @@ function DeliveriesPanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [api, projectId, reloadVersion, status]);
+  }, [api, projectId, reloadVersion, status, refreshVersion]);
 
   async function showDetail(delivery: Delivery) {
     setDetailLoading(true);
@@ -697,6 +702,52 @@ function DeliveriesPanel({
     }
   }
 
+  function toggleSelected(id: string) {
+    setSelectedIds((current) =>
+      current.includes(id)
+        ? current.filter((candidate) => candidate !== id)
+        : [...current, id],
+    );
+  }
+
+  async function bulkAction(action: "replay" | "cancel") {
+    if (selectedIds.length === 0 || actionPending) return;
+    setActionPending(true);
+    setError(null);
+    try {
+      await api.request(`${projectPath(projectId)}/deliveries/bulk-${action}`, {
+        method: "POST",
+        body: {
+          deliveryIds: selectedIds,
+          ...(action === "cancel" ? { reason: "cancelled_by_user" } : {}),
+        },
+        idempotencyKey: crypto.randomUUID(),
+      });
+      setSelectedIds([]);
+      setRefreshVersion((value) => value + 1);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setActionPending(false);
+    }
+  }
+
+  async function reconcile() {
+    if (actionPending) return;
+    setActionPending(true);
+    setError(null);
+    try {
+      await api.request(`${projectPath(projectId)}/deliveries/reconcile`, {
+        method: "POST",
+      });
+      setRefreshVersion((value) => value + 1);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setActionPending(false);
+    }
+  }
+
   return (
     <section className="panel" aria-labelledby="deliveries-heading">
       <div className="section-heading">
@@ -715,8 +766,35 @@ function DeliveriesPanel({
             <option value="failed">Failed</option>
             <option value="pending">Pending</option>
             <option value="in_flight">In flight</option>
+            <option value="cancelled">Cancelled</option>
           </select>
         </label>
+      </div>
+      <div className="actions">
+        <button
+          className="button ghost"
+          type="button"
+          onClick={() => void bulkAction("replay")}
+          disabled={actionPending || selectedIds.length === 0}
+        >
+          Replay selected ({selectedIds.length})
+        </button>
+        <button
+          className="button ghost"
+          type="button"
+          onClick={() => void bulkAction("cancel")}
+          disabled={actionPending || selectedIds.length === 0}
+        >
+          Cancel selected
+        </button>
+        <button
+          className="button ghost"
+          type="button"
+          onClick={() => void reconcile()}
+          disabled={actionPending}
+        >
+          Reconcile expired
+        </button>
       </div>
       {error && !selected ? (
         <div className="error" role="alert">
@@ -733,23 +811,30 @@ function DeliveriesPanel({
         <>
           <div className="delivery-list">
             {deliveries.map((delivery) => (
-              <button
-                className="delivery-row"
-                key={delivery.id}
-                type="button"
-                onClick={() => void showDetail(delivery)}
-              >
-                <span>
-                  <strong>{delivery.eventType}</strong>
-                  <small>
-                    {delivery.endpoint.name} · attempt {delivery.attemptCount}
-                  </small>
-                </span>
-                <span className="delivery-meta">
-                  <StatusBadge status={delivery.status} />
-                  <time>{formatDate(delivery.createdAt)}</time>
-                </span>
-              </button>
+              <div className="delivery-row" key={delivery.id}>
+                <input
+                  type="checkbox"
+                  aria-label={`Select ${delivery.eventType} delivery`}
+                  checked={selectedIds.includes(delivery.id)}
+                  onChange={() => toggleSelected(delivery.id)}
+                />
+                <button
+                  className="delivery-row-content"
+                  type="button"
+                  onClick={() => void showDetail(delivery)}
+                >
+                  <span>
+                    <strong>{delivery.eventType}</strong>
+                    <small>
+                      {delivery.endpoint.name} · attempt {delivery.attemptCount}
+                    </small>
+                  </span>
+                  <span className="delivery-meta">
+                    <StatusBadge status={delivery.status} />
+                    <time>{formatDate(delivery.createdAt)}</time>
+                  </span>
+                </button>
+              </div>
             ))}
           </div>
           {cursor ? (

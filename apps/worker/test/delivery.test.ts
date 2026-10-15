@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import { deliverJob } from "../src/delivery.js";
 import { verifyWebhookSignature } from "../src/signature.js";
-import { deliveryJob, encryptionKey } from "./fixtures.js";
+import {
+  deliveryJob,
+  encryptFixtureSecret,
+  encryptionKey,
+} from "./fixtures.js";
 
 describe("HTTP delivery", () => {
   it("sends a signed raw JSON body with bounded request behavior", async () => {
@@ -46,6 +50,32 @@ describe("HTTP delivery", () => {
 
     expect(result.outcome).toBe("failed");
     expect(result.errorClassification).toBe("response_too_large");
+  });
+
+  it("adds encrypted static headers without allowing integrity overrides", async () => {
+    let receivedHeaders: Headers | undefined;
+    const result = await deliverJob(
+      deliveryJob({
+        encryptedStaticHeaders: {
+          "x-api-key": encryptFixtureSecret("api-key"),
+          "x-hookforge-signature": encryptFixtureSecret("forged"),
+        },
+      }),
+      {
+        encryptionKey,
+        allowPrivateEndpoints: false,
+        requestTimeoutMs: 1_000,
+        maxResponseBytes: 100,
+        fetchImpl: async (_url, init) => {
+          receivedHeaders = new Headers(init?.headers);
+          return new Response("accepted", { status: 200 });
+        },
+      },
+    );
+
+    expect(result.outcome).toBe("success");
+    expect(receivedHeaders?.get("x-api-key")).toBe("api-key");
+    expect(receivedHeaders?.get("x-hookforge-signature")).toMatch(/^v1=/);
   });
 
   it("rejects private destinations again at delivery time", async () => {

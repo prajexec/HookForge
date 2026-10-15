@@ -12,6 +12,9 @@
   persisted only as SHA-256 hashes and can be revoked.
 - Endpoint signing secrets use AES-256-GCM encryption at rest and are returned
   only during creation or rotation.
+- Custom endpoint headers are encrypted with the same AES-256-GCM key; only
+  header names are returned. Generated content type, user-agent, and
+  `x-hookforge-*` integrity headers cannot be overridden.
 - Project and endpoint queries require an authenticated owner predicate; an
   object belonging to another user is returned as `404`.
 - Endpoint URL registration and update reject non-HTTP(S) schemes, credentials,
@@ -26,6 +29,10 @@
 - Delivery inspection, replay, and reconciliation queries are scoped through
   the authenticated project owner. Replay preserves history and does not allow
   a caller to submit an arbitrary event or endpoint ID.
+- Bulk replay and cancellation are bounded to 100 explicit IDs and require an
+  idempotency key. Cancellation of an in-flight delivery only takes effect
+  after the current request completes; it cannot retract an HTTP request already
+  accepted by a receiver.
 - The dashboard keeps bearer tokens in React memory only, sends them over the
   relative same-origin API path, omits credentials/cookies, and never stores or
   logs signing secrets. A production deployment should serve the web app and
@@ -39,20 +46,26 @@
   dependencies; local Compose defaults use a known development key and must not
   be used as production secrets.
 
-## Planned security boundaries
+## Local sandbox boundary
 
-The domain milestones still need login rate limiting, event payload limits,
-constant-time HMAC comparison for delivery, and full response redaction across
-future delivery diagnostics. Current SQL access is parameterized and endpoint
-secrets are encrypted, but the master encryption key must be supplied through a
-secret manager in production.
+The built-in mock receiver is bounded, in-memory, and published on loopback by
+Compose. Sandbox captures omit authorization and cookie headers. The API only
+proxies capture inspection for endpoint URLs it created from the configured
+sandbox receiver; it is not an arbitrary URL proxy. `ALLOW_PRIVATE_ENDPOINTS`
+is enabled by the default development Compose profile solely so the worker can
+reach `mock-receiver` on the private Compose network and must remain disabled in
+production.
 
 Outbound delivery is an SSRF boundary. Endpoint registration and every delivery
 must validate URL schemes, resolve hostnames, reject loopback, private,
 link-local, and cloud-metadata ranges by default, revalidate DNS at send time,
 revalidate every redirect hop, and disable redirects unless explicitly made
-safe. The local receiver example will use an explicit test configuration rather
-than turning the API into an unrestricted proxy.
+safe. The sandbox uses an opaque high-entropy token in its receiver path and
+should not be published beyond localhost.
+
+Dead-letter alerts are signed webhook deliveries to an endpoint owned by the
+same project. Alert payloads include delivery metadata, not the original event
+payload, and alert deliveries do not recursively generate more alerts.
 
 At-least-once delivery means a receiver can see a duplicate request. Receivers
 must verify the timestamped HMAC and deduplicate event IDs before performing

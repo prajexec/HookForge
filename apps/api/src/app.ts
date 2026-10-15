@@ -9,10 +9,12 @@ import type { AppConfig } from "./config.js";
 import type { AppDependencies } from "./dependencies.js";
 import { AppError } from "./errors.js";
 import { registerAuthRoutes } from "./routes/auth.js";
+import { registerAlertRoutes } from "./routes/alerts.js";
 import { registerEndpointRoutes } from "./routes/endpoints.js";
 import { registerEventRoutes } from "./routes/events.js";
 import { registerDeliveryRoutes } from "./routes/deliveries.js";
 import { registerProjectRoutes } from "./routes/projects.js";
+import { registerSandboxRoutes } from "./routes/sandbox.js";
 import type { EndpointUrlValidator } from "./security/url.js";
 import { Metrics } from "./metrics.js";
 import { InMemoryRateLimiter, type RateLimiter } from "./rate-limit.js";
@@ -122,6 +124,11 @@ export async function buildApp({
   await registerDeliveryRoutes(app, {
     store: dependencies.store,
     metrics,
+  });
+  await registerAlertRoutes(app, { store: dependencies.store });
+  await registerSandboxRoutes(app, {
+    config,
+    store: dependencies.store,
   });
 
   app.setErrorHandler((error, request, reply) => {

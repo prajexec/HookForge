@@ -125,8 +125,9 @@ reported as `404`.
 
 ## Implemented endpoint routes
 
-- `POST /api/v1/projects/{projectId}/endpoints` — create `{name,url}` and
-  return the signing secret once.
+- `POST /api/v1/projects/{projectId}/endpoints` — create `{name,url}`, optional
+  `eventPatterns`, and encrypted static `headers`; return the signing secret
+  once.
 - `GET /api/v1/projects/{projectId}/endpoints` — list owned endpoints with a
   `limit` query parameter.
 - `GET /api/v1/projects/{projectId}/endpoints/{endpointId}` — retrieve an
@@ -139,6 +140,9 @@ reported as `404`.
   secret version and return the new plaintext once.
 - `DELETE .../{endpointId}` — safely disables the endpoint and preserves its
   record for future delivery history.
+- `GET` and `PUT` `.../{endpointId}/subscriptions` — inspect or replace exact
+  event types and terminal-wildcard patterns such as `payment.*`. An empty
+  pattern list opts the endpoint out of future events.
 
 Endpoint list/detail responses never include a signing secret. URL validation
 allows only HTTP(S), rejects credentials and fragments, blocks local/private,
@@ -149,6 +153,11 @@ production.
 
 Endpoint lists are currently bounded to the first 100 records and use local
 dashboard search. Delivery and event lists use opaque keyset cursors.
+
+Static header values are encrypted at rest and are never returned; endpoint
+responses expose only `staticHeaderNames`. Header snapshots are copied into
+queued deliveries so editing an endpoint does not change work already accepted.
+HookForge-generated integrity headers cannot be overridden.
 
 ## Event ingestion
 
@@ -168,9 +177,9 @@ Requires a bearer token and accepts:
 
 The payload must be valid JSON and is limited by `MAX_EVENT_PAYLOAD_BYTES`
 (128 KiB by default). The API persists the event and creates one `pending`
-delivery row for every endpoint that is active at commit time. Paused and
-disabled endpoints are not scheduled. The response is `202 Accepted` and does
-not wait for an HTTP receiver.
+delivery row for every active endpoint whose subscription matches the event.
+Paused, disabled, and non-matching endpoints are not scheduled. The response is
+`202 Accepted` and does not wait for an HTTP receiver.
 
 Send an optional `Idempotency-Key` header to safely retry ingestion. The key is
 scoped to the project and the request fingerprint includes `eventType` and a
@@ -201,7 +210,8 @@ user. Supported query parameters are:
 
 - `limit` — 1 through 100, default 25
 - `cursor` — opaque cursor returned by the previous response
-- `status` — `pending`, `in_flight`, `delivered`, or `failed`
+- `status` — `pending`, `in_flight`, `delivered`, `failed`, or `cancelled`
+- `kind` — `event` or `dead_letter_alert`; normal lists default to `event`
 - `endpointId` — filter by endpoint UUID
 - `eventType` — filter by exact event type
 - `from` and `to` — ISO-8601 creation-time range; `to` is exclusive
@@ -224,8 +234,30 @@ active. The response is `202 Accepted` with `replayNumber` and the source
 delivery ID. Replaying a pending, in-flight, or delivered delivery returns
 `409`.
 
+### Bulk replay and cancellation
+
+`POST .../deliveries/bulk-replay` and `POST .../deliveries/bulk-cancel` accept up
+to 100 explicit `deliveryIds` and require an `Idempotency-Key`. Replays preserve
+source rows and return per-ID skipped reasons. Cancellation changes pending rows
+to `cancelled` and marks in-flight rows for cancellation after their current
+attempt. A completed request cannot be retracted from a receiver.
+
 ### `POST /api/v1/projects/{projectId}/deliveries/reconcile`
 
 Returns expired in-flight deliveries for that project to `pending` and clears
 their leases. The worker performs the same recovery automatically while
 claiming; this route is an explicit operational reconciliation tool.
+
+## Sandbox and dead-letter alerts
+
+`POST /api/v1/projects/{projectId}/sandbox/endpoints` creates a normal signed
+endpoint targeting the Compose `mock-receiver` and returns a one-time signing
+secret plus its browser-accessible public URL. The capture proxy routes are
+`GET` and `DELETE` at
+`.../{endpointId}/sandbox/requests`. Captures are bounded and ephemeral; the
+receiver is exposed on loopback at `http://localhost:8080` by default.
+
+Configure signed dead-letter alerting with `GET`, `PUT`, and `DELETE`
+`/api/v1/projects/{projectId}/alerts/dead-letter`. The destination must be an
+owned non-disabled endpoint. Terminal event failures create one metadata-only
+`dead_letter_alert` delivery and never recursively alert on alert failures.

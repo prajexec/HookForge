@@ -15,6 +15,7 @@ const requiredServices = [
   "migrate",
   "api",
   "worker",
+  "mock-receiver",
   "web",
 ];
 
@@ -27,6 +28,7 @@ const requiredBuildTargets = {
   api: "api",
   migrate: "migrate",
   worker: "worker",
+  "mock-receiver": "mock-receiver",
   web: "web",
 };
 for (const [service, target] of Object.entries(requiredBuildTargets)) {
@@ -43,6 +45,27 @@ if (
 }
 if (services.worker.healthcheck === undefined) {
   throw new Error("Worker service must have a heartbeat health check");
+}
+if (services["mock-receiver"].healthcheck === undefined) {
+  throw new Error("Mock receiver service must have a health check");
+}
+const mockReceiverHealthcheck = JSON.stringify(
+  services["mock-receiver"].healthcheck.test,
+);
+if (!mockReceiverHealthcheck.includes("/health")) {
+  throw new Error("Mock receiver health check must call /health");
+}
+const mockReceiverPorts = services["mock-receiver"].ports ?? [];
+if (
+  !mockReceiverPorts.some(
+    (port) =>
+      port.host_ip === "127.0.0.1" &&
+      port.target === 8080 &&
+      (typeof port.published === "number" ||
+        (typeof port.published === "string" && port.published.length > 0)),
+  )
+) {
+  throw new Error("Mock receiver must publish port 8080 on loopback only");
 }
 if (
   services.api.depends_on?.migrate?.condition !==

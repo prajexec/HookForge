@@ -29,6 +29,8 @@ export function deliveryJob(overrides: Partial<DeliveryJob> = {}): DeliveryJob {
     endpointUrl: "https://93.184.216.34/hook",
     endpointSecretVersion: 1,
     encryptedSecret: encryptFixtureSecret("whsec_test_secret"),
+    encryptedStaticHeaders: {},
+    deliveryKind: "event",
     attemptNumber: 1,
     leaseToken: randomUUID(),
     ...overrides,

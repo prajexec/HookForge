@@ -27,9 +27,12 @@ export interface Endpoint {
   createdAt: string;
   updatedAt: string;
   lastSuccessfulDeliveryAt: string | null;
+  eventPatterns: string[];
+  staticHeaderNames: string[];
 }
 
-export type DeliveryStatus = "pending" | "in_flight" | "delivered" | "failed";
+export type DeliveryStatus =
+  "pending" | "in_flight" | "delivered" | "failed" | "cancelled";
 
 export interface Delivery {
   id: string;
@@ -47,6 +50,10 @@ export interface Delivery {
   completedAt: string | null;
   replayOfDeliveryId: string | null;
   replayNumber: number;
+  deliveryKind: "event" | "dead_letter_alert";
+  cancelledAt: string | null;
+  deadLetteredAt: string | null;
+  deadLetterReason: string | null;
 }
 
 export interface DeliveryAttempt {
@@ -83,4 +90,12 @@ export interface Overview {
   events: number;
   endpoints: { active: number; paused: number; disabled: number };
   deliveries: Record<DeliveryStatus, number>;
+}
+
+export interface SandboxRequest {
+  id?: string;
+  receivedAt: string;
+  method: string;
+  headers: Record<string, string | string[]>;
+  rawBody: string;
 }

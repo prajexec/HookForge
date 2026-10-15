@@ -11,16 +11,16 @@ npm install
 docker compose up -d
 ```
 
-Compose builds the multi-stage API, worker, and web images and runs a one-shot
-migration service before API/worker startup. The default stack publishes only
-the API and web loopback ports; PostgreSQL and Redis remain private to the
-Compose network.
+Compose builds the multi-stage API, worker, mock-receiver, and web images and
+runs a one-shot migration service before API/worker startup. The default stack
+publishes API, web, and loopback receiver ports; PostgreSQL and Redis remain
+private to the Compose network.
 
 Use the loopback-only debug override when application processes should run on
 the host instead:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres redis
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres redis mock-receiver
 npm run db:migrate
 npm run dev:api
 npm run start:worker
@@ -31,7 +31,8 @@ npm run dev:web
 
 `DATABASE_URL`, `REDIS_URL`, `HOST`, `PORT`, `API_PORT`, `WEB_PORT`, `LOG_LEVEL`, `CORS_ORIGIN`,
 `RATE_LIMIT_*`, `SESSION_TTL_SECONDS`, `MAX_EVENT_PAYLOAD_BYTES`, `SECRET_ENCRYPTION_KEY`, and
-`ALLOW_PRIVATE_ENDPOINTS` are validated by Zod at API startup. Worker-specific
+`ALLOW_PRIVATE_ENDPOINTS`, `SANDBOX_ENABLED`, and the sandbox receiver URLs are
+validated by Zod at API startup. Worker-specific
 concurrency, lease, timeout, retry, and response-size settings are validated by
 the worker process. `.env` is
 ignored by Git. The example encryption key and database password are local-only
@@ -66,7 +67,7 @@ records its version. Never edit an already-applied migration; add a new one.
 
 The Compose `migrate` service runs this same runner and exits successfully
 before `api` and `worker` are allowed to start. Its advisory lock also makes
-manual reruns safe. The Compose image has separate `api`, `worker`, `migrate`,
+manual reruns safe. The Compose image has separate `api`, `worker`, `mock-receiver`, `migrate`,
 and `web` targets in the root `Dockerfile`.
 
 Run `npm run verify:deployment` to validate the Compose service graph, build

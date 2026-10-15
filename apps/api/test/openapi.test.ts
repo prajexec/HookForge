@@ -23,11 +23,23 @@ const expectedOperations: Record<string, string[]> = {
   "/api/v1/projects/{projectId}/endpoints/{endpointId}/pause": ["post"],
   "/api/v1/projects/{projectId}/endpoints/{endpointId}/resume": ["post"],
   "/api/v1/projects/{projectId}/endpoints/{endpointId}/rotate-secret": ["post"],
+  "/api/v1/projects/{projectId}/endpoints/{endpointId}/subscriptions": [
+    "get",
+    "put",
+  ],
+  "/api/v1/projects/{projectId}/sandbox/endpoints": ["post"],
+  "/api/v1/projects/{projectId}/endpoints/{endpointId}/sandbox/requests": [
+    "delete",
+    "get",
+  ],
   "/api/v1/projects/{projectId}/events": ["get", "post"],
   "/api/v1/projects/{projectId}/deliveries": ["get"],
   "/api/v1/projects/{projectId}/deliveries/reconcile": ["post"],
+  "/api/v1/projects/{projectId}/deliveries/bulk-replay": ["post"],
+  "/api/v1/projects/{projectId}/deliveries/bulk-cancel": ["post"],
   "/api/v1/projects/{projectId}/deliveries/{deliveryId}": ["get"],
   "/api/v1/projects/{projectId}/deliveries/{deliveryId}/replay": ["post"],
+  "/api/v1/projects/{projectId}/alerts/dead-letter": ["delete", "get", "put"],
 };
 
 describe("OpenAPI contract", () => {

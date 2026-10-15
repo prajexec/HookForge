@@ -208,6 +208,8 @@ const schemas: Record<string, Schema> = {
       "createdAt",
       "updatedAt",
       "lastSuccessfulDeliveryAt",
+      "eventPatterns",
+      "staticHeaderNames",
     ],
     properties: {
       id: uuid,
@@ -218,6 +220,8 @@ const schemas: Record<string, Schema> = {
       createdAt: timestamp,
       updatedAt: timestamp,
       lastSuccessfulDeliveryAt: nullableTimestamp,
+      eventPatterns: { type: "array", items: { type: "string" } },
+      staticHeaderNames: { type: "array", items: { type: "string" } },
     },
   },
   EventSummary: {
@@ -250,6 +254,10 @@ const schemas: Record<string, Schema> = {
       "completedAt",
       "replayOfDeliveryId",
       "replayNumber",
+      "deliveryKind",
+      "cancelledAt",
+      "deadLetteredAt",
+      "deadLetterReason",
     ],
     properties: {
       id: uuid,
@@ -268,7 +276,7 @@ const schemas: Record<string, Schema> = {
       },
       status: {
         type: "string",
-        enum: ["pending", "in_flight", "delivered", "failed"],
+        enum: ["pending", "in_flight", "delivered", "failed", "cancelled"],
       },
       attemptCount: { type: "integer", minimum: 0 },
       nextAttemptAt: timestamp,
@@ -283,6 +291,10 @@ const schemas: Record<string, Schema> = {
       completedAt: nullableTimestamp,
       replayOfDeliveryId: { type: ["string", "null"], format: "uuid" },
       replayNumber: { type: "integer", minimum: 0 },
+      deliveryKind: { type: "string", enum: ["event", "dead_letter_alert"] },
+      cancelledAt: nullableTimestamp,
+      deadLetteredAt: nullableTimestamp,
+      deadLetterReason: { type: ["string", "null"] },
     },
   },
   DeliveryAttempt: {
@@ -340,12 +352,13 @@ const schemas: Record<string, Schema> = {
       },
       deliveryStatusCounts: {
         type: "object",
-        required: ["pending", "inFlight", "delivered", "failed"],
+        required: ["pending", "inFlight", "delivered", "failed", "cancelled"],
         properties: {
           pending: { type: "integer", minimum: 0 },
           inFlight: { type: "integer", minimum: 0 },
           delivered: { type: "integer", minimum: 0 },
           failed: { type: "integer", minimum: 0 },
+          cancelled: { type: "integer", minimum: 0 },
         },
       },
       deliveryLatencyMilliseconds: {
@@ -722,6 +735,17 @@ const paths: Record<string, Record<string, OperationObject>> = {
               maxLength: 2048,
               format: "uri",
             },
+            headers: {
+              type: "object",
+              additionalProperties: { type: "string", maxLength: 2048 },
+              maxProperties: 20,
+            },
+            eventPatterns: {
+              type: "array",
+              minItems: 1,
+              maxItems: 20,
+              items: { type: "string", minLength: 1, maxLength: 100 },
+            },
           },
         },
         "Endpoint configuration",
@@ -810,6 +834,11 @@ const paths: Record<string, Record<string, OperationObject>> = {
               minLength: 1,
               maxLength: 2048,
               format: "uri",
+            },
+            headers: {
+              type: "object",
+              additionalProperties: { type: "string", maxLength: 2048 },
+              maxProperties: 20,
             },
           },
         },
@@ -902,6 +931,128 @@ const paths: Record<string, Record<string, OperationObject>> = {
         "400": errorResponse("The endpoint or project ID is invalid"),
         "401": errorResponse("Authentication is required"),
         "404": errorResponse("Endpoint not found"),
+      },
+    },
+  },
+  "/api/v1/projects/{projectId}/endpoints/{endpointId}/subscriptions": {
+    get: {
+      summary: "List endpoint event subscriptions",
+      operationId: "listEndpointSubscriptions",
+      tags: ["Endpoints"],
+      security: bearerSecurity,
+      parameters: endpointParameters,
+      responses: {
+        "200": response("Endpoint event patterns", {
+          type: "object",
+          required: ["patterns"],
+          properties: {
+            patterns: { type: "array", items: { type: "string" } },
+          },
+        }),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Endpoint not found"),
+      },
+    },
+    put: {
+      summary: "Replace endpoint event subscriptions",
+      operationId: "replaceEndpointSubscriptions",
+      tags: ["Endpoints"],
+      security: bearerSecurity,
+      parameters: endpointParameters,
+      requestBody: jsonRequest(
+        {
+          type: "object",
+          required: ["patterns"],
+          properties: {
+            patterns: {
+              type: "array",
+              maxItems: 20,
+              items: { type: "string" },
+            },
+          },
+        },
+        "Exact event types and terminal-wildcard patterns",
+      ),
+      responses: {
+        "200": response("Subscriptions replaced", {
+          type: "object",
+          required: ["patterns"],
+          properties: {
+            patterns: { type: "array", items: { type: "string" } },
+          },
+        }),
+        "400": errorResponse("The subscription patterns are invalid"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Endpoint not found"),
+      },
+    },
+  },
+  "/api/v1/projects/{projectId}/sandbox/endpoints": {
+    post: {
+      summary: "Create an ephemeral local sandbox endpoint",
+      operationId: "createSandboxEndpoint",
+      tags: ["Sandbox"],
+      security: bearerSecurity,
+      parameters: projectParameters,
+      requestBody: jsonRequest(
+        { type: "object", properties: { name: { type: "string" } } },
+        "Optional sandbox endpoint name",
+      ),
+      responses: {
+        "201": response("Sandbox endpoint created", {
+          type: "object",
+          required: ["endpoint", "signingSecret", "sandbox"],
+          properties: {
+            endpoint: ref("Endpoint"),
+            signingSecret: { type: "string" },
+            sandbox: {
+              type: "object",
+              required: ["publicUrl"],
+              properties: { publicUrl: { type: "string", format: "uri" } },
+            },
+          },
+        }),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project not found or sandbox disabled"),
+      },
+    },
+  },
+  "/api/v1/projects/{projectId}/endpoints/{endpointId}/sandbox/requests": {
+    get: {
+      summary: "Inspect captured local sandbox requests",
+      operationId: "listSandboxRequests",
+      tags: ["Sandbox"],
+      security: bearerSecurity,
+      parameters: [
+        ...endpointParameters,
+        queryParameter(
+          "limit",
+          { type: "integer", minimum: 1, maximum: 100, default: 100 },
+          "Maximum captures",
+        ),
+      ],
+      responses: {
+        "200": response("Captured sandbox requests", {
+          type: "object",
+          required: ["requests"],
+          properties: {
+            requests: { type: "array", items: { type: "object" } },
+          },
+        }),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Sandbox endpoint not found"),
+      },
+    },
+    delete: {
+      summary: "Clear captured local sandbox requests",
+      operationId: "clearSandboxRequests",
+      tags: ["Sandbox"],
+      security: bearerSecurity,
+      parameters: endpointParameters,
+      responses: {
+        "204": response("Sandbox requests cleared"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Sandbox endpoint not found"),
       },
     },
   },
@@ -1007,9 +1158,14 @@ const paths: Record<string, Record<string, OperationObject>> = {
           "status",
           {
             type: "string",
-            enum: ["pending", "in_flight", "delivered", "failed"],
+            enum: ["pending", "in_flight", "delivered", "failed", "cancelled"],
           },
           "Filter by delivery status",
+        ),
+        queryParameter(
+          "kind",
+          { type: "string", enum: ["event", "dead_letter_alert"] },
+          "Filter by delivery kind",
         ),
         queryParameter(
           "endpointId",
@@ -1066,6 +1222,83 @@ const paths: Record<string, Record<string, OperationObject>> = {
       },
     },
   },
+  "/api/v1/projects/{projectId}/deliveries/bulk-replay": {
+    post: {
+      summary: "Replay selected failed deliveries",
+      operationId: "bulkReplayDeliveries",
+      tags: ["Deliveries"],
+      security: bearerSecurity,
+      parameters: [
+        ...projectParameters,
+        {
+          name: "Idempotency-Key",
+          in: "header",
+          required: true,
+          schema: { type: "string", minLength: 1, maxLength: 255 },
+        },
+      ],
+      requestBody: jsonRequest(
+        {
+          type: "object",
+          required: ["deliveryIds"],
+          properties: {
+            deliveryIds: {
+              type: "array",
+              minItems: 1,
+              maxItems: 100,
+              items: uuid,
+            },
+          },
+        },
+        "Selected delivery IDs",
+      ),
+      responses: {
+        "202": response("Selected replays queued", { type: "object" }),
+        "400": errorResponse("The selected delivery IDs are invalid"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project not found"),
+      },
+    },
+  },
+  "/api/v1/projects/{projectId}/deliveries/bulk-cancel": {
+    post: {
+      summary: "Cancel selected pending or in-flight deliveries",
+      operationId: "bulkCancelDeliveries",
+      tags: ["Deliveries"],
+      security: bearerSecurity,
+      parameters: [
+        ...projectParameters,
+        {
+          name: "Idempotency-Key",
+          in: "header",
+          required: true,
+          schema: { type: "string", minLength: 1, maxLength: 255 },
+        },
+      ],
+      requestBody: jsonRequest(
+        {
+          type: "object",
+          required: ["deliveryIds"],
+          properties: {
+            deliveryIds: {
+              type: "array",
+              minItems: 1,
+              maxItems: 100,
+              items: uuid,
+            },
+            reason: { type: "string", maxLength: 200 },
+          },
+        },
+        "Selected delivery IDs and optional reason",
+      ),
+      responses: {
+        "200": response("Selected deliveries cancelled", { type: "object" }),
+        "400": errorResponse("The selected delivery IDs are invalid"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project not found"),
+      },
+    },
+  },
   "/api/v1/projects/{projectId}/deliveries/{deliveryId}": {
     get: {
       summary: "Inspect a delivery and its attempts",
@@ -1114,6 +1347,53 @@ const paths: Record<string, Record<string, OperationObject>> = {
       },
     },
   },
+  "/api/v1/projects/{projectId}/alerts/dead-letter": {
+    get: {
+      summary: "Get the dead-letter alert destination",
+      operationId: "getDeadLetterAlert",
+      tags: ["Alerts"],
+      security: bearerSecurity,
+      parameters: projectParameters,
+      responses: {
+        "200": response("Dead-letter alert configuration", { type: "object" }),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project not found"),
+      },
+    },
+    put: {
+      summary: "Configure dead-letter alerts",
+      operationId: "setDeadLetterAlert",
+      tags: ["Alerts"],
+      security: bearerSecurity,
+      parameters: projectParameters,
+      requestBody: jsonRequest(
+        {
+          type: "object",
+          required: ["endpointId"],
+          properties: { endpointId: uuid },
+        },
+        "Owned alert endpoint",
+      ),
+      responses: {
+        "200": response("Dead-letter alerts configured", { type: "object" }),
+        "400": errorResponse("The endpoint ID is invalid"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project or endpoint not found"),
+      },
+    },
+    delete: {
+      summary: "Disable dead-letter alerts",
+      operationId: "clearDeadLetterAlert",
+      tags: ["Alerts"],
+      security: bearerSecurity,
+      parameters: projectParameters,
+      responses: {
+        "204": response("Dead-letter alerts disabled"),
+        "401": errorResponse("Authentication is required"),
+        "404": errorResponse("Project not found"),
+      },
+    },
+  },
 };
 
 for (const operations of Object.values(paths)) {
@@ -1144,11 +1424,13 @@ export const openApiDocument: OpenApiDocument = {
     { name: "Authentication", description: "Opaque bearer session management" },
     { name: "Projects", description: "Tenant-scoped project management" },
     { name: "Endpoints", description: "Webhook endpoint configuration" },
+    { name: "Sandbox", description: "Local mock receiver inspection" },
     { name: "Events", description: "Durable event ingestion and listing" },
     {
       name: "Deliveries",
       description: "Delivery inspection, reconciliation, and replay",
     },
+    { name: "Alerts", description: "Dead-letter alert routing" },
   ],
   paths,
   components: {

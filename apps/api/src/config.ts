@@ -71,6 +71,18 @@ const environmentSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+  SANDBOX_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((value) => value === "true"),
+  SANDBOX_RECEIVER_INTERNAL_URL: z
+    .string()
+    .url()
+    .default("http://localhost:8080"),
+  SANDBOX_RECEIVER_PUBLIC_URL: z
+    .string()
+    .url()
+    .default("http://localhost:8080"),
 });
 
 export type AppConfig = Omit<

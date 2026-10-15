@@ -1,8 +1,8 @@
 # Architecture diagrams
 
-The solid foundation components are implemented now. Dashed nodes and flows
-are the accepted delivery milestones and are intentionally marked as future
-until their code lands.
+The solid foundation components and local sandbox are implemented now. The
+customer receiver remains an external system; `mock-receiver` is the bounded
+local inspection service.
 
 ## High-level component architecture
 
@@ -11,8 +11,9 @@ flowchart LR
   Browser[React dashboard] --> API[Fastify API]
   API --> PG[(PostgreSQL source of truth)]
   API --> Redis[(Redis ephemeral state)]
-  Worker[Delivery worker - future] --> PG
-  Worker --> Receiver[Customer webhook receiver - future]
+  Worker[Delivery worker] --> PG
+  Worker --> Receiver[Customer webhook receiver]
+  Worker --> Sandbox[Local mock receiver]
   Web[Static web app] -. serves .-> Browser
 ```
 
@@ -67,6 +68,9 @@ stateDiagram-v2
   InFlight --> Failed: terminal failure or attempts exhausted
   InFlight --> Pending: lease expires after worker crash
   Failed --> Pending: API creates a separate replay delivery
+  InFlight --> Cancelled: cancellation requested
+  Pending --> Cancelled: bulk cancellation
+  Failed --> Alert[Dead-letter alert delivery]
   Delivered --> [*]
   Failed --> [*]
 ```

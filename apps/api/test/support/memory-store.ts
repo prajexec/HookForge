@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { conflict, notFound } from "../../src/errors.js";
 import type {
   EncryptedSecretRecord,
+  EncryptedHeaderMap,
   EndpointRecord,
   EndpointStatus,
   DeliveryAttemptRecord,
@@ -13,6 +14,8 @@ import type {
   DeliveryListFilter,
   DeliveryListResult,
   DeliverySummary,
+  BulkDeliveryResult,
+  AlertDestination,
   OperationalMetrics,
   EventRecord,
   HookForgeStore,
@@ -37,8 +40,18 @@ function eventTimestamp(value: string): string {
   );
 }
 
+function matchesSubscription(pattern: string, eventType: string): boolean {
+  return pattern === "*"
+    ? true
+    : pattern.endsWith("*")
+      ? eventType.startsWith(pattern.slice(0, -1))
+      : pattern === eventType;
+}
+
 export class MemoryStore implements HookForgeStore {
   public readonly secrets = new Map<string, EncryptedSecretRecord[]>();
+  public readonly staticHeaders = new Map<string, EncryptedHeaderMap>();
+  public readonly subscriptions = new Map<string, string[]>();
   public readonly events = new Map<string, EventRecord>();
   public readonly deliveries: DeliverySummary[] = [];
   public readonly attempts = new Map<string, DeliveryAttemptRecord[]>();
@@ -53,6 +66,15 @@ export class MemoryStore implements HookForgeStore {
     string,
     { requestHash: string; eventId: string }
   >();
+  private readonly bulkOperations = new Map<
+    string,
+    {
+      operation: "replay" | "cancel";
+      requestHash: string;
+      response: BulkDeliveryResult;
+    }
+  >();
+  private readonly deadLetterAlerts = new Map<string, string>();
 
   public async createUser(input: {
     email: string;
@@ -233,6 +255,8 @@ export class MemoryStore implements HookForgeStore {
     nameNormalized: string;
     url: string;
     secret: EncryptedSecretRecord;
+    staticHeaders: EncryptedHeaderMap;
+    eventPatterns: string[];
   }): Promise<EndpointRecord> {
     const project = await this.getProject(input.ownerId, input.projectId);
     if (!project) {
@@ -258,12 +282,16 @@ export class MemoryStore implements HookForgeStore {
       url: input.url,
       status: "active" as const,
       currentSecretVersion: 1,
+      eventPatterns: [...input.eventPatterns],
+      staticHeaderNames: Object.keys(input.staticHeaders).sort(),
       lastSuccessfulDeliveryAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     this.endpoints.set(endpoint.id, endpoint);
     this.secrets.set(endpoint.id, [input.secret]);
+    this.staticHeaders.set(endpoint.id, input.staticHeaders);
+    this.subscriptions.set(endpoint.id, [...input.eventPatterns]);
     return endpoint;
   }
 
@@ -297,7 +325,12 @@ export class MemoryStore implements HookForgeStore {
     ownerId: string,
     projectId: string,
     endpointId: string,
-    input: { name?: string; nameNormalized?: string; url?: string },
+    input: {
+      name?: string;
+      nameNormalized?: string;
+      url?: string;
+      staticHeaders?: EncryptedHeaderMap;
+    },
   ): Promise<EndpointRecord | null> {
     const endpoint = await this.getEndpoint(ownerId, projectId, endpointId);
     if (!endpoint) {
@@ -319,6 +352,10 @@ export class MemoryStore implements HookForgeStore {
     }
     if (input.name) endpoint.name = input.name;
     if (input.url) endpoint.url = input.url;
+    if (input.staticHeaders) {
+      this.staticHeaders.set(endpoint.id, input.staticHeaders);
+      endpoint.staticHeaderNames = Object.keys(input.staticHeaders).sort();
+    }
     endpoint.updatedAt = now();
     return endpoint;
   }
@@ -361,6 +398,28 @@ export class MemoryStore implements HookForgeStore {
       secret,
     ]);
     return endpoint;
+  }
+
+  public async listEndpointSubscriptions(
+    ownerId: string,
+    projectId: string,
+    endpointId: string,
+  ): Promise<string[] | null> {
+    if (!(await this.getEndpoint(ownerId, projectId, endpointId))) return null;
+    return [...(this.subscriptions.get(endpointId) ?? [])];
+  }
+
+  public async replaceEndpointSubscriptions(
+    ownerId: string,
+    projectId: string,
+    endpointId: string,
+    patterns: string[],
+  ): Promise<string[] | null> {
+    if (!(await this.getEndpoint(ownerId, projectId, endpointId))) return null;
+    this.subscriptions.set(endpointId, [...patterns]);
+    const endpoint = this.endpoints.get(endpointId);
+    if (endpoint) endpoint.eventPatterns = [...patterns];
+    return [...patterns];
   }
 
   public async ingestEvent(input: {
@@ -416,7 +475,11 @@ export class MemoryStore implements HookForgeStore {
 
     const activeEndpoints = [...this.endpoints.values()].filter(
       (endpoint) =>
-        endpoint.projectId === input.projectId && endpoint.status === "active",
+        endpoint.projectId === input.projectId &&
+        endpoint.status === "active" &&
+        (this.subscriptions.get(endpoint.id) ?? ["*"]).some((pattern) =>
+          matchesSubscription(pattern, input.eventType),
+        ),
     );
     for (const endpoint of activeEndpoints) {
       this.deliveries.push({
@@ -437,6 +500,10 @@ export class MemoryStore implements HookForgeStore {
         completedAt: null,
         replayOfDeliveryId: null,
         replayNumber: 0,
+        deliveryKind: "event",
+        cancelledAt: null,
+        deadLetteredAt: null,
+        deadLetterReason: null,
       });
     }
 
@@ -504,6 +571,13 @@ export class MemoryStore implements HookForgeStore {
     const filtered = this.deliveries
       .filter((delivery) => {
         if (delivery.projectId !== projectId) return false;
+        if (
+          filter.deliveryKind &&
+          delivery.deliveryKind !== filter.deliveryKind
+        )
+          return false;
+        if (!filter.deliveryKind && delivery.deliveryKind !== "event")
+          return false;
         if (filter.status && delivery.status !== filter.status) return false;
         if (filter.endpointId && delivery.endpointId !== filter.endpointId)
           return false;
@@ -553,6 +627,9 @@ export class MemoryStore implements HookForgeStore {
       ).length,
       failed: this.deliveries.filter((delivery) => delivery.status === "failed")
         .length,
+      cancelled: this.deliveries.filter(
+        (delivery) => delivery.status === "cancelled",
+      ).length,
     };
     return {
       queueBacklog: {
@@ -638,9 +715,211 @@ export class MemoryStore implements HookForgeStore {
       completedAt: null,
       replayOfDeliveryId: source.id,
       replayNumber,
+      deliveryKind: "event",
+      cancelledAt: null,
+      deadLetteredAt: null,
+      deadLetterReason: null,
     };
     this.deliveries.push(replay);
     return replay;
+  }
+
+  public async bulkReplayDeliveries(input: {
+    ownerId: string;
+    projectId: string;
+    deliveryIds: string[];
+    idempotencyKey: string;
+    requestHash: string;
+  }): Promise<BulkDeliveryResult | null> {
+    return this.runBulk(input, "replay", () => {
+      const deliveries: DeliverySummary[] = [];
+      const skipped: Array<{ deliveryId: string; reason: string }> = [];
+      for (const deliveryId of input.deliveryIds) {
+        const source = this.deliveries.find(
+          (candidate) =>
+            candidate.id === deliveryId &&
+            candidate.projectId === input.projectId,
+        );
+        if (!source) {
+          skipped.push({ deliveryId, reason: "DELIVERY_NOT_FOUND" });
+          continue;
+        }
+        if (source.status !== "failed") {
+          skipped.push({ deliveryId, reason: "DELIVERY_NOT_FAILED" });
+          continue;
+        }
+        const endpoint = this.endpoints.get(source.endpointId);
+        if (!endpoint || endpoint.status !== "active") {
+          skipped.push({ deliveryId, reason: "ENDPOINT_NOT_ACTIVE" });
+          continue;
+        }
+        const event = this.events.get(source.eventId)!;
+        const replayNumber =
+          Math.max(
+            ...this.deliveries
+              .filter(
+                (candidate) =>
+                  candidate.eventId === source.eventId &&
+                  candidate.endpointId === source.endpointId,
+              )
+              .map((candidate) => candidate.replayNumber),
+          ) + 1;
+        const replay: DeliverySummary = {
+          id: randomUUID(),
+          projectId: input.projectId,
+          eventId: source.eventId,
+          eventType: event.eventType,
+          endpointId: endpoint.id,
+          endpointName: endpoint.name,
+          endpointUrl: endpoint.url,
+          status: "pending",
+          attemptCount: 0,
+          nextAttemptAt: now(),
+          lastHttpStatusCode: null,
+          lastError: null,
+          createdAt: now(),
+          updatedAt: now(),
+          completedAt: null,
+          replayOfDeliveryId: source.id,
+          replayNumber,
+          deliveryKind: "event",
+          cancelledAt: null,
+          deadLetteredAt: null,
+          deadLetterReason: null,
+        };
+        this.deliveries.push(replay);
+        deliveries.push(replay);
+      }
+      return { deliveries, skipped };
+    });
+  }
+
+  public async bulkCancelDeliveries(input: {
+    ownerId: string;
+    projectId: string;
+    deliveryIds: string[];
+    idempotencyKey: string;
+    requestHash: string;
+    reason: string;
+  }): Promise<BulkDeliveryResult | null> {
+    return this.runBulk(input, "cancel", () => {
+      const deliveries: DeliverySummary[] = [];
+      const skipped: Array<{ deliveryId: string; reason: string }> = [];
+      for (const deliveryId of input.deliveryIds) {
+        const delivery = this.deliveries.find(
+          (candidate) =>
+            candidate.id === deliveryId &&
+            candidate.projectId === input.projectId,
+        );
+        if (!delivery) {
+          skipped.push({ deliveryId, reason: "DELIVERY_NOT_FOUND" });
+          continue;
+        }
+        if (delivery.status === "pending") {
+          delivery.status = "cancelled";
+          delivery.cancelledAt = now();
+          delivery.completedAt = delivery.cancelledAt;
+          delivery.lastError = input.reason;
+          delivery.updatedAt = delivery.cancelledAt;
+          deliveries.push(delivery);
+        } else if (delivery.status === "in_flight") {
+          delivery.lastError = input.reason;
+          delivery.updatedAt = now();
+          deliveries.push(delivery);
+        } else {
+          skipped.push({
+            deliveryId,
+            reason: `DELIVERY_${delivery.status.toUpperCase()}`,
+          });
+        }
+      }
+      return { deliveries, skipped };
+    });
+  }
+
+  private async runBulk(
+    input: {
+      ownerId: string;
+      projectId: string;
+      deliveryIds: string[];
+      idempotencyKey: string;
+      requestHash: string;
+    },
+    operation: "replay" | "cancel",
+    run: () => {
+      deliveries: DeliverySummary[];
+      skipped: Array<{ deliveryId: string; reason: string }>;
+    },
+  ): Promise<BulkDeliveryResult | null> {
+    if (!(await this.getProject(input.ownerId, input.projectId))) return null;
+    const key = `${input.projectId}:${input.idempotencyKey}`;
+    const existing = this.bulkOperations.get(key);
+    if (existing) {
+      if (
+        existing.operation !== operation ||
+        existing.requestHash !== input.requestHash
+      ) {
+        throw conflict(
+          "IDEMPOTENCY_KEY_REUSED",
+          "Idempotency-Key was already used for another bulk operation",
+        );
+      }
+      return existing.response;
+    }
+    const result = run();
+    const response: BulkDeliveryResult = {
+      operationId: randomUUID(),
+      requested: input.deliveryIds.length,
+      processed: result.deliveries.length,
+      deliveries: result.deliveries,
+      skipped: result.skipped,
+    };
+    this.bulkOperations.set(key, {
+      operation,
+      requestHash: input.requestHash,
+      response,
+    });
+    return response;
+  }
+
+  public async getDeadLetterAlert(
+    ownerId: string,
+    projectId: string,
+  ): Promise<AlertDestination | null> {
+    if (!(await this.getProject(ownerId, projectId))) return null;
+    const endpointId = this.deadLetterAlerts.get(projectId);
+    const endpoint = endpointId ? this.endpoints.get(endpointId) : undefined;
+    return endpoint
+      ? {
+          endpointId: endpoint.id,
+          endpointName: endpoint.name,
+          endpointUrl: endpoint.url,
+          updatedAt: endpoint.updatedAt,
+        }
+      : null;
+  }
+
+  public async setDeadLetterAlert(input: {
+    ownerId: string;
+    projectId: string;
+    endpointId: string;
+  }): Promise<AlertDestination | null> {
+    const endpoint = await this.getEndpoint(
+      input.ownerId,
+      input.projectId,
+      input.endpointId,
+    );
+    if (!endpoint || endpoint.status === "disabled") return null;
+    this.deadLetterAlerts.set(input.projectId, input.endpointId);
+    return this.getDeadLetterAlert(input.ownerId, input.projectId);
+  }
+
+  public async clearDeadLetterAlert(
+    ownerId: string,
+    projectId: string,
+  ): Promise<boolean> {
+    if (!(await this.getProject(ownerId, projectId))) return false;
+    return this.deadLetterAlerts.delete(projectId);
   }
 
   public async reconcileExpiredDeliveries(

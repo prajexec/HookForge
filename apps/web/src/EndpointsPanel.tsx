@@ -30,11 +30,15 @@ export function EndpointsPanel({
   const [search, setSearch] = useState("");
   const [createName, setCreateName] = useState("");
   const [createUrl, setCreateUrl] = useState("");
+  const [createHeaders, setCreateHeaders] = useState("{}");
+  const [createPatterns, setCreatePatterns] = useState("*");
   const [editingEndpointId, setEditingEndpointId] = useState<string | null>(
     null,
   );
   const [editName, setEditName] = useState("");
   const [editUrl, setEditUrl] = useState("");
+  const [editHeaders, setEditHeaders] = useState("{}");
+  const [editPatterns, setEditPatterns] = useState("*");
   const [confirmation, setConfirmation] = useState<{
     endpointId: string;
     action: "disable" | "rotate";
@@ -59,8 +63,12 @@ export function EndpointsPanel({
     setSigningSecret(null);
     setCreateName("");
     setCreateUrl("");
+    setCreateHeaders("{}");
+    setCreatePatterns("*");
     setEditName("");
     setEditUrl("");
+    setEditHeaders("{}");
+    setEditPatterns("*");
     setSearch("");
 
     return () => {
@@ -161,6 +169,32 @@ export function EndpointsPanel({
     setEditingEndpointId(endpoint.id);
     setEditName(endpoint.name);
     setEditUrl(endpoint.url);
+    setEditHeaders("{}");
+    setEditPatterns((endpoint.eventPatterns ?? ["*"]).join(", "));
+  }
+
+  function parseHeaders(value: string): Record<string, string> | null {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        Object.values(parsed).some((item) => typeof item !== "string")
+      ) {
+        return null;
+      }
+      return parsed as Record<string, string>;
+    } catch {
+      return null;
+    }
+  }
+
+  function parsePatterns(value: string): string[] {
+    return value
+      .split(",")
+      .map((pattern) => pattern.trim())
+      .filter(Boolean);
   }
 
   function handleCreate(event: FormEvent<HTMLFormElement>) {
@@ -171,6 +205,23 @@ export function EndpointsPanel({
       setMutationError("Name and URL are required.");
       return;
     }
+    const headers = parseHeaders(createHeaders);
+    const eventPatterns = parsePatterns(createPatterns);
+    if (!headers || eventPatterns.length === 0) {
+      setMutationError(
+        "Headers must be a JSON object and at least one event pattern is required.",
+      );
+      return;
+    }
+
+    const body = {
+      name,
+      url,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(eventPatterns.length !== 1 || eventPatterns[0] !== "*"
+        ? { eventPatterns }
+        : {}),
+    };
 
     void runMutation(
       (signal) =>
@@ -178,7 +229,7 @@ export function EndpointsPanel({
           `${projectPath(projectId)}/endpoints`,
           {
             method: "POST",
-            body: { name, url },
+            body,
             signal,
           },
         ),
@@ -188,6 +239,8 @@ export function EndpointsPanel({
         );
         setCreateName("");
         setCreateUrl("");
+        setCreateHeaders("{}");
+        setCreatePatterns("*");
         setSigningSecret(response.signingSecret);
       },
     );
@@ -201,21 +254,53 @@ export function EndpointsPanel({
       setMutationError("Name and URL are required.");
       return;
     }
+    const headers = parseHeaders(editHeaders);
+    const eventPatterns = parsePatterns(editPatterns);
+    if (!headers || eventPatterns.length === 0) {
+      setMutationError(
+        "Headers must be a JSON object and at least one event pattern is required.",
+      );
+      return;
+    }
 
+    const patternsChanged = editPatterns.trim() !== "*";
+    const headersChanged = editHeaders.trim() !== "{}";
     void runMutation(
       (signal) =>
-        api.request<EndpointResponse>(
-          `${projectPath(projectId)}/endpoints/${encodeURIComponent(endpointId)}`,
-          {
-            method: "PATCH",
-            body: { name, url },
-            signal,
-          },
-        ),
-      () => {
+        (async () => {
+          const endpoint = await api.request<EndpointResponse>(
+            `${projectPath(projectId)}/endpoints/${encodeURIComponent(endpointId)}`,
+            {
+              method: "PATCH",
+              body: {
+                name,
+                url,
+                ...(headersChanged ? { headers } : {}),
+              },
+              signal,
+            },
+          );
+          if (patternsChanged) {
+            const subscriptions = await api.request<{ patterns: string[] }>(
+              `${projectPath(projectId)}/endpoints/${encodeURIComponent(endpointId)}/subscriptions`,
+              { method: "PUT", body: { patterns: eventPatterns }, signal },
+            );
+            return { ...endpoint, patterns: subscriptions.patterns };
+          }
+          return endpoint;
+        })(),
+      (response) => {
         setEndpoints((current) =>
           current.map((endpoint) =>
-            endpoint.id === endpointId ? { ...endpoint, name, url } : endpoint,
+            endpoint.id === endpointId
+              ? {
+                  ...response.endpoint,
+                  eventPatterns: ("patterns" in response
+                    ? response.patterns
+                    : undefined) ??
+                    endpoint.eventPatterns ?? ["*"],
+                }
+              : endpoint,
           ),
         );
         setEditingEndpointId(null);
@@ -348,6 +433,26 @@ export function EndpointsPanel({
               disabled={mutationPending}
             />
           </label>
+          <label>
+            Custom headers <span className="muted">JSON</span>
+            <textarea
+              value={createHeaders}
+              onChange={(event) => setCreateHeaders(event.target.value)}
+              rows={3}
+              spellCheck={false}
+              placeholder={'{"Authorization":"Bearer …"}'}
+              disabled={mutationPending}
+            />
+          </label>
+          <label>
+            Event patterns <span className="muted">comma-separated</span>
+            <input
+              value={createPatterns}
+              onChange={(event) => setCreatePatterns(event.target.value)}
+              placeholder="payment.*, user.created"
+              disabled={mutationPending}
+            />
+          </label>
           <div className="actions">
             <button type="submit" disabled={mutationPending}>
               Add endpoint
@@ -443,18 +548,44 @@ export function EndpointsPanel({
                     </td>
                     <td>
                       {editingEndpointId === endpoint.id ? (
-                        <label>
-                          <span className="muted">Edit URL</span>
-                          <input
-                            type="url"
-                            maxLength={2048}
-                            form={`edit-endpoint-${endpoint.id}`}
-                            value={editUrl}
-                            onChange={(event) => setEditUrl(event.target.value)}
-                            required
-                            disabled={mutationPending}
-                          />
-                        </label>
+                        <>
+                          <label>
+                            <span className="muted">Edit URL</span>
+                            <input
+                              type="url"
+                              maxLength={2048}
+                              form={`edit-endpoint-${endpoint.id}`}
+                              value={editUrl}
+                              onChange={(event) =>
+                                setEditUrl(event.target.value)
+                              }
+                              required
+                              disabled={mutationPending}
+                            />
+                          </label>
+                          <label>
+                            <span className="muted">Custom headers JSON</span>
+                            <textarea
+                              rows={3}
+                              value={editHeaders}
+                              onChange={(event) =>
+                                setEditHeaders(event.target.value)
+                              }
+                              spellCheck={false}
+                              disabled={mutationPending}
+                            />
+                          </label>
+                          <label>
+                            <span className="muted">Event patterns</span>
+                            <input
+                              value={editPatterns}
+                              onChange={(event) =>
+                                setEditPatterns(event.target.value)
+                              }
+                              disabled={mutationPending}
+                            />
+                          </label>
+                        </>
                       ) : (
                         <span>{endpoint.url}</span>
                       )}

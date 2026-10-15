@@ -18,11 +18,17 @@ The repository currently contains the following working slices:
 - PostgreSQL domain schema for users, sessions, projects, endpoints, and
   encrypted secret versions.
 - Bearer-token authentication and tenant-scoped project/endpoint APIs.
-- Idempotent event ingestion with atomic delivery fan-out for active endpoints.
+- Idempotent event ingestion with atomic, pattern-filtered delivery fan-out for
+  active endpoints.
+- Encrypted per-endpoint static headers, one-time secret display, and immutable
+  delivery snapshots for URL, signing secret, headers, and routing decisions.
 - PostgreSQL-backed worker with leases, bounded HTTP delivery, HMAC signatures,
   retry scheduling, attempt history, and abandoned-lease recovery.
-- Paginated delivery inspection, attempt-history detail, replay, and lease
-  reconciliation APIs.
+- Paginated delivery inspection, attempt-history detail, replay, bulk replay and
+  cancellation, dead-letter metadata, alert routing, and lease reconciliation
+  APIs.
+- A bounded, in-memory `mock-receiver` Compose service and dashboard sandbox for
+  inspecting real outbound requests locally.
 - API-backed React dashboard for projects, endpoints, events, and deliveries.
 - ARM64-conscious multi-stage Docker images and Compose startup orchestration.
 - Bounded API rate limits, safe operational metrics, worker heartbeat health,
@@ -74,16 +80,18 @@ npm install
 docker compose up -d
 ```
 
-Compose builds and starts the migration job, API, worker, and web dashboard.
+Compose builds and starts the migration job, API, worker, mock receiver, and web dashboard.
 The dashboard is available at `http://localhost:5173`; the API is available at
-`http://localhost:3000`. PostgreSQL and Redis ports are intentionally private to
-the Compose network.
+`http://localhost:3000`. The mock receiver is available at
+`http://localhost:8080`; PostgreSQL and Redis ports are intentionally private to
+the Compose network. Create a sandbox endpoint from the dashboard to capture
+signed requests without deploying another service.
 
 To run only PostgreSQL and Redis while running the application processes on the
 host, use the debug override:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres redis
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d postgres redis mock-receiver
 npm run db:migrate
 npm run dev:api
 npm run start:worker
@@ -141,23 +149,21 @@ of the normal setup or cleanup flow.
 
 ## Screenshots and demo
 
-The media slots below are intentionally labeled placeholders until updated
-captures are available from the API-backed dashboard and delivery workflow.
+The captures below come from the API-backed dashboard and delivery workflow.
 
-![HookForge dashboard screenshot placeholder](docs/media/dashboard-placeholder.svg)
+![HookForge dashboard screenshot](docs/media/dashboard.png)
 
-![HookForge delivery demo GIF placeholder](docs/media/delivery-demo-placeholder.svg)
+![HookForge delivery workflow](docs/media/delivery-demo.gif)
 
-Replace these files with the real dashboard screenshot and delivery demo GIF;
-the README links can remain unchanged.
+The captures show the API-backed dashboard, a delivered local receiver request, event
+ingestion, delivery status changes, and delivery-attempt inspection.
 
 ## Current limitations and roadmap
 
-The current milestone accepts, schedules, delivers, inspects, and replays
-events through the API and standalone worker process, with the dashboard,
-Docker deployment, operational observability, and OpenAPI contract now present.
-Future work should be driven by measured product and scale requirements rather
-than adding an unverified platform component.
+The current milestone accepts, routes, schedules, delivers, inspects, replays,
+and cancels events through the API and standalone worker process. It also
+includes endpoint subscriptions, encrypted custom headers, a local receiver,
+bulk delivery operations, and signed dead-letter alerts.
 
 `npm test` runs fast in-memory unit and route tests. Once PostgreSQL and Redis
 are running, `npm run test:integration` applies migrations and runs the real

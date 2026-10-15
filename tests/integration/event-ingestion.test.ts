@@ -38,6 +38,11 @@ beforeAll(async () => {
        ($2, $3, 'Paused', 'paused', 'https://example.com/paused', 'paused')`,
     [activeEndpointId, pausedEndpointId, projectId],
   );
+  await pool.query(
+    `INSERT INTO endpoint_subscriptions (endpoint_id, pattern)
+     VALUES ($1, '*')`,
+    [activeEndpointId],
+  );
 });
 
 afterAll(async () => {
@@ -65,6 +70,13 @@ describe("PostgreSQL event ingestion", () => {
 
     expect(result.deduplicated).toBe(false);
     expect(result.deliveryCount).toBe(1);
+
+    // Keep this fixture out of the global worker queue. The worker integration
+    // suite uses the same development database and owns the only due fixture.
+    await pool.query(
+      "UPDATE deliveries SET next_attempt_at = now() + interval '1 hour' WHERE event_id = $1",
+      [result.event.id],
+    );
 
     const rows = await pool.query<{ status: string; endpoint_id: string }>(
       "SELECT status, endpoint_id FROM deliveries WHERE event_id = $1",

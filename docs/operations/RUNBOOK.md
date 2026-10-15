@@ -8,8 +8,10 @@ docker compose ps
 docker compose logs -f --tail=100
 ```
 
-Compose starts PostgreSQL and Redis, runs the one-shot `migrate` service, then
-starts the API and worker. The web service starts only after the API is healthy.
+Compose starts PostgreSQL, Redis, and the bounded `mock-receiver`, runs the
+one-shot `migrate` service, then starts the API and worker. The web service starts
+only after the API is healthy. The receiver is published at
+`http://localhost:8080` and retains captures in memory.
 `GET /health` checks process liveness. `GET /ready` checks the PostgreSQL and
 Redis dependencies required by the API. Health responses intentionally omit
 internal connection details.
@@ -60,7 +62,7 @@ measuring the downstream and PostgreSQL workload.
 
 ## Logs and disk
 
-Use `docker compose logs --tail=100 postgres redis migrate api worker web` for
+Use `docker compose logs --tail=100 postgres redis migrate api worker mock-receiver web` for
 dependency, migration, application, and proxy diagnostics. API logs include
 request IDs and worker logs are structured JSON. Check disk usage with
 `docker system df`. Remove only project-specific stopped containers or unused
@@ -71,6 +73,20 @@ expired leases for one project explicitly, call the reconcile route; normal
 worker claims recover them automatically. Replay only terminal failures and
 confirm the endpoint is active before replaying. Backups and broader incident
 procedures should include both `deliveries` and `delivery_attempts`.
+
+## Bulk operations and dead letters
+
+Bulk replay and cancellation accept at most 100 explicit delivery IDs and
+require an `Idempotency-Key`. A pending delivery becomes `cancelled`; an
+in-flight delivery records a cancellation request and is cancelled after its
+current attempt completes. Cancellation cannot retract an HTTP request already
+sent to a receiver.
+
+Terminal worker failures are marked with `dead_lettered_at` and
+`dead_letter_reason`. Configure a project dead-letter alert destination with the
+alerts API; HookForge creates a signed metadata-only alert delivery and avoids
+recursion for alert delivery failures. Inspect `delivery_kind=dead_letter_alert`
+when diagnosing the alert path.
 
 ## Rate limits
 

@@ -78,8 +78,9 @@ beforeAll(async () => {
     await pool.query(
       `INSERT INTO deliveries
          (id, event_id, endpoint_id, endpoint_url, endpoint_secret_version,
-          status, created_at, updated_at)
-       VALUES ($1, $2, $3, 'https://example.com/active', 1, $4, $5, $5)`,
+         status, next_attempt_at, created_at, updated_at)
+       VALUES ($1, $2, $3, 'https://example.com/active', 1, $4,
+               now() + interval '1 hour', $5, $5)`,
       [
         deliveryIds[index],
         eventIds[index],

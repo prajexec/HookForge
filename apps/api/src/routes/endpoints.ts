@@ -8,25 +8,84 @@ import {
   createEndpointUrlValidator,
   type EndpointUrlValidator,
 } from "../security/url.js";
-import type { EndpointRecord, HookForgeStore } from "../store.js";
+import type {
+  EndpointRecord,
+  EncryptedHeaderMap,
+  HookForgeStore,
+} from "../store.js";
 import { authenticate } from "./auth.js";
 
 const endpointParamsSchema = z.object({
   projectId: z.string().uuid(),
   endpointId: z.string().uuid().optional(),
 });
+const eventPatternSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(100)
+  .regex(/^(?:\*|[^*]+\*?)$/, "must be an exact event type or end with *");
+const headersSchema = z
+  .record(
+    z
+      .string()
+      .regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/, "must be an HTTP header name"),
+    z
+      .string()
+      .max(2048)
+      .refine((value) => !/[\r\n]/.test(value), "must not contain CR/LF"),
+  )
+  .superRefine((headers, context) => {
+    const reserved = new Set([
+      "content-type",
+      "user-agent",
+      "x-hookforge-event-id",
+      "x-hookforge-timestamp",
+      "x-hookforge-signature",
+    ]);
+    for (const name of Object.keys(headers)) {
+      if (reserved.has(name.toLowerCase())) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name],
+          message: "is reserved by HookForge",
+        });
+      }
+    }
+    if (Object.keys(headers).length > 20) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "at most 20 custom headers are allowed",
+      });
+    }
+    if (JSON.stringify(headers).length > 20_000) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "custom headers are too large",
+      });
+    }
+  });
 const createEndpointSchema = z.object({
   name: z.string().trim().min(1).max(120),
   url: z.string().trim().min(1).max(2048),
+  headers: headersSchema.default({}),
+  eventPatterns: z.array(eventPatternSchema).max(20).default(["*"]),
 });
 const updateEndpointSchema = z
   .object({
     name: z.string().trim().min(1).max(120).optional(),
     url: z.string().trim().min(1).max(2048).optional(),
+    headers: headersSchema.optional(),
   })
-  .refine((value) => value.name !== undefined || value.url !== undefined, {
-    message: "At least one endpoint field must be provided",
-  });
+  .refine(
+    (value) =>
+      value.name !== undefined ||
+      value.url !== undefined ||
+      value.headers !== undefined,
+    {
+      message: "At least one endpoint field must be provided",
+    },
+  );
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
@@ -54,7 +113,21 @@ function endpointResponse(endpoint: EndpointRecord) {
     createdAt: endpoint.createdAt,
     updatedAt: endpoint.updatedAt,
     lastSuccessfulDeliveryAt: endpoint.lastSuccessfulDeliveryAt,
+    eventPatterns: endpoint.eventPatterns,
+    staticHeaderNames: endpoint.staticHeaderNames,
   };
+}
+
+function encryptHeaders(
+  headers: Record<string, string>,
+  encryptionKey: string,
+): EncryptedHeaderMap {
+  return Object.fromEntries(
+    Object.entries(headers).map(([name, value]) => [
+      name,
+      encryptSecret(value, encryptionKey),
+    ]),
+  );
 }
 
 function endpointNotFound(endpoint: EndpointRecord | null): EndpointRecord {
@@ -96,6 +169,11 @@ export async function registerEndpointRoutes(
       nameNormalized: input.name.toLocaleLowerCase(),
       url,
       secret: encryptSecret(signingSecret, config.SECRET_ENCRYPTION_KEY),
+      staticHeaders: encryptHeaders(
+        input.headers,
+        config.SECRET_ENCRYPTION_KEY,
+      ),
+      eventPatterns: input.eventPatterns,
     });
 
     return reply.code(201).send({
@@ -145,14 +223,24 @@ export async function registerEndpointRoutes(
         ? await urlValidator.validate(input.url)
         : undefined;
       try {
-        const update: { name?: string; nameNormalized?: string; url?: string } =
-          {};
+        const update: {
+          name?: string;
+          nameNormalized?: string;
+          url?: string;
+          staticHeaders?: EncryptedHeaderMap;
+        } = {};
         if (input.name !== undefined) {
           update.name = input.name;
           update.nameNormalized = input.name.toLocaleLowerCase();
         }
         if (url !== undefined) {
           update.url = url;
+        }
+        if (input.headers !== undefined) {
+          update.staticHeaders = encryptHeaders(
+            input.headers,
+            config.SECRET_ENCRYPTION_KEY,
+          );
         }
         const endpoint = endpointNotFound(
           await store.updateEndpoint(
@@ -227,6 +315,41 @@ export async function registerEndpointRoutes(
         ),
       );
       return reply.code(204).send();
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/endpoints/:endpointId/subscriptions",
+    async (request, reply) => {
+      const auth = await authenticate(request, store);
+      const params = parse(endpointParamsSchema, request.params);
+      const patterns = await store.listEndpointSubscriptions(
+        auth.user.id,
+        params.projectId,
+        params.endpointId!,
+      );
+      if (!patterns) throw notFound();
+      return reply.send({ patterns });
+    },
+  );
+
+  app.put(
+    "/api/v1/projects/:projectId/endpoints/:endpointId/subscriptions",
+    async (request, reply) => {
+      const auth = await authenticate(request, store);
+      const params = parse(endpointParamsSchema, request.params);
+      const input = parse(
+        z.object({ patterns: z.array(eventPatternSchema).max(20) }).strict(),
+        request.body,
+      );
+      const patterns = await store.replaceEndpointSubscriptions(
+        auth.user.id,
+        params.projectId,
+        params.endpointId!,
+        input.patterns,
+      );
+      if (!patterns) throw notFound();
+      return reply.send({ patterns });
     },
   );
 }

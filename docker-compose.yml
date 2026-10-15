@@ -60,7 +60,10 @@ services:
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-86400}
       MAX_EVENT_PAYLOAD_BYTES: ${MAX_EVENT_PAYLOAD_BYTES:-131072}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
-      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-false}
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-true}
+      SANDBOX_ENABLED: ${SANDBOX_ENABLED:-true}
+      SANDBOX_RECEIVER_INTERNAL_URL: ${SANDBOX_RECEIVER_INTERNAL_URL:-http://mock-receiver:8080}
+      SANDBOX_RECEIVER_PUBLIC_URL: ${SANDBOX_RECEIVER_PUBLIC_URL:-http://localhost:8080}
     ports:
       - "127.0.0.1:${API_PORT:-3000}:3000"
     depends_on:
@@ -69,6 +72,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mock-receiver:
         condition: service_healthy
     healthcheck:
       test:
@@ -92,7 +97,7 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hookforge}:${POSTGRES_PASSWORD:-hookforge_dev_only}@postgres:5432/${POSTGRES_DB:-hookforge}
       SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
-      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-false}
+      ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-true}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
       WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-250}
       WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
@@ -109,6 +114,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      mock-receiver:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -121,6 +128,33 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+    restart: unless-stopped
+    networks:
+      - hookforge_backend
+
+  mock-receiver:
+    build:
+      context: .
+      target: mock-receiver
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: 8080
+      MOCK_RECEIVER_MAX_REQUESTS: ${MOCK_RECEIVER_MAX_REQUESTS:-100}
+      MOCK_RECEIVER_MAX_TOKENS: ${MOCK_RECEIVER_MAX_TOKENS:-1000}
+      MOCK_RECEIVER_MAX_BODY_BYTES: ${MOCK_RECEIVER_MAX_BODY_BYTES:-262144}
+    ports:
+      - "127.0.0.1:${MOCK_RECEIVER_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     networks:
       - hookforge_backend

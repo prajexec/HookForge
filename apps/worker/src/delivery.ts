@@ -84,12 +84,22 @@ export async function deliverJob(
   const requestAt = now();
   let validatedUrl: string;
   let secret: string;
+  let staticHeaders: Record<string, string>;
   try {
     validatedUrl = await validateDeliveryUrl(
       job.endpointUrl,
       options.allowPrivateEndpoints,
     );
     secret = decryptSecret(job.encryptedSecret, options.encryptionKey);
+    staticHeaders = Object.fromEntries(
+      Object.entries(job.encryptedStaticHeaders).map(([name, encrypted]) => {
+        const value = decryptSecret(encrypted, options.encryptionKey);
+        if (/[\r\n]/.test(value)) {
+          throw new Error("Custom header values must not contain CR/LF");
+        }
+        return [name, value];
+      }),
+    );
   } catch (error) {
     return {
       requestAt,
@@ -123,12 +133,15 @@ export async function deliverJob(
   try {
     const response = await fetchFunction(validatedUrl, {
       method: "POST",
-      headers: buildSignatureHeaders({
-        eventId: job.eventId,
-        timestampSeconds,
-        rawBody,
-        secret,
-      }),
+      headers: {
+        ...staticHeaders,
+        ...buildSignatureHeaders({
+          eventId: job.eventId,
+          timestampSeconds,
+          rawBody,
+          secret,
+        }),
+      },
       body: rawBody,
       redirect: "error",
       signal: controller.signal,

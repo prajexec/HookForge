@@ -9,6 +9,7 @@ ENV npm_config_update_notifier=false \
 FROM base AS dependencies
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/mock-receiver/package.json apps/mock-receiver/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
@@ -24,6 +25,7 @@ RUN npm run build
 FROM base AS production-dependencies
 COPY package.json package-lock.json ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/mock-receiver/package.json apps/mock-receiver/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/shared/package.json packages/shared/package.json
@@ -49,6 +51,18 @@ COPY --from=production-dependencies /app/apps/worker/package.json ./apps/worker/
 COPY --from=builder /app/apps/worker/dist ./apps/worker/dist
 USER node
 CMD ["node", "apps/worker/dist/index.js"]
+
+FROM base AS mock-receiver
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=8080
+COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=production-dependencies /app/package.json ./package.json
+COPY --from=production-dependencies /app/apps/mock-receiver/package.json ./apps/mock-receiver/package.json
+COPY --from=builder /app/apps/mock-receiver/dist ./apps/mock-receiver/dist
+EXPOSE 8080
+USER node
+CMD ["node", "apps/mock-receiver/dist/server.js"]
 
 FROM builder AS migrate
 ENV NODE_ENV=development

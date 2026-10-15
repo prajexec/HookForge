@@ -308,6 +308,156 @@ describe("authenticated project and endpoint management", () => {
     expect(store.events.size).toBe(0);
   });
 
+  it("routes events by endpoint pattern and stores only custom header names", async () => {
+    const { app, store } = await createApplication();
+    const user = await register(app, "routing@example.com");
+    const headers = { authorization: `Bearer ${user.token}` };
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers,
+      payload: { name: "Routing" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+
+    const paymentEndpoint = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: {
+        name: "Payments",
+        url: "https://example.com/payments",
+        eventPatterns: ["payment.*"],
+        headers: { "X-Tenant": "tenant-1" },
+      },
+    });
+    expect(paymentEndpoint.statusCode).toBe(201);
+    expect(paymentEndpoint.json().endpoint.eventPatterns).toEqual([
+      "payment.*",
+    ]);
+    expect(paymentEndpoint.json().endpoint.staticHeaderNames).toEqual([
+      "X-Tenant",
+    ]);
+    expect(paymentEndpoint.json()).not.toHaveProperty("headers");
+
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: {
+        name: "Users",
+        url: "https://example.com/users",
+        eventPatterns: ["user.created"],
+      },
+    });
+
+    const payment = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: { eventType: "payment.created", payload: {} },
+    });
+    expect(payment.json().deliveriesScheduled).toBe(1);
+    const userEvent = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: { eventType: "user.created", payload: {} },
+    });
+    expect(userEvent.json().deliveriesScheduled).toBe(1);
+
+    const endpointId = paymentEndpoint.json().endpoint.id as string;
+    const replaced = await app.inject({
+      method: "PUT",
+      url: `/api/v1/projects/${projectId}/endpoints/${endpointId}/subscriptions`,
+      headers,
+      payload: { patterns: [] },
+    });
+    expect(replaced.statusCode).toBe(200);
+    expect(replaced.json().patterns).toEqual([]);
+    const ignored = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: { eventType: "payment.updated", payload: {} },
+    });
+    expect(ignored.json().deliveriesScheduled).toBe(0);
+    expect(store.deliveries).toHaveLength(2);
+  });
+
+  it("supports idempotent bulk replay and cancellation with dead-letter alert configuration", async () => {
+    const { app, store } = await createApplication();
+    const user = await register(app, "bulk@example.com");
+    const headers = { authorization: `Bearer ${user.token}` };
+    const projectResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/projects",
+      headers,
+      payload: { name: "Bulk" },
+    });
+    const projectId = projectResponse.json().project.id as string;
+    const endpoint = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/endpoints`,
+      headers,
+      payload: { name: "Receiver", url: "https://example.com/bulk" },
+    });
+    const endpointId = endpoint.json().endpoint.id as string;
+    const event = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: { eventType: "bulk.test", payload: {} },
+    });
+    const source = store.deliveries.find(
+      (delivery) => delivery.eventId === event.json().event.id,
+    )!;
+    source.status = "failed";
+    const pending = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/events`,
+      headers,
+      payload: { eventType: "bulk.pending", payload: {} },
+    });
+    const pendingDelivery = store.deliveries.find(
+      (delivery) => delivery.eventId === pending.json().event.id,
+    )!;
+
+    const replay = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/deliveries/bulk-replay`,
+      headers: { ...headers, "idempotency-key": "bulk-replay-1" },
+      payload: { deliveryIds: [source.id] },
+    });
+    expect(replay.statusCode).toBe(202);
+    expect(replay.json().processed).toBe(1);
+    const replayAgain = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/deliveries/bulk-replay`,
+      headers: { ...headers, "idempotency-key": "bulk-replay-1" },
+      payload: { deliveryIds: [source.id] },
+    });
+    expect(replayAgain.json().operationId).toBe(replay.json().operationId);
+
+    const cancel = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/deliveries/bulk-cancel`,
+      headers: { ...headers, "idempotency-key": "bulk-cancel-1" },
+      payload: { deliveryIds: [pendingDelivery.id] },
+    });
+    expect(cancel.statusCode).toBe(200);
+    expect(cancel.json().deliveries[0].status).toBe("cancelled");
+
+    const alert = await app.inject({
+      method: "PUT",
+      url: `/api/v1/projects/${projectId}/alerts/dead-letter`,
+      headers,
+      payload: { endpointId },
+    });
+    expect(alert.statusCode).toBe(200);
+    expect(alert.json().alert.endpointId).toBe(endpointId);
+  });
+
   it("rejects event payloads over the configured limit", async () => {
     const { app } = await createApplication(new MemoryStore(), {
       ...config,

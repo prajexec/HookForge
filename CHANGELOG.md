@@ -16,6 +16,9 @@
   validation, endpoint lifecycle actions, and 20 automated tests.
 - Added event ingestion with canonical idempotency keys, payload limits, active
   endpoint fan-out, endpoint configuration snapshots, and durable delivery rows.
+- Added endpoint event-pattern subscriptions, encrypted static outbound headers,
+  header/routing snapshots, bulk replay and cancellation with idempotency, and
+  dead-letter metadata with signed project alert deliveries.
 - Added the delivery worker with PostgreSQL leases, HMAC-SHA256 signatures,
   bounded HTTP requests, retry classification/backoff, response excerpts, and
   abandoned-lease recovery.
@@ -26,6 +29,8 @@
   detail, and replay actions.
 - Added ARM64-conscious multi-stage Docker targets, Nginx API proxying, Compose
   migration ordering, application health checks, and local service commands.
+- Added a bounded in-memory mock receiver, sandbox creation/inspection routes,
+  and dashboard controls for local request capture and bulk delivery actions.
 - Added bounded API rate limits, request/response metrics, PostgreSQL worker
   heartbeats, safe operational aggregates, and a configurable k6 benchmark
   harness.
